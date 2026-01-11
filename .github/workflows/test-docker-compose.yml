@@ -1,0 +1,121 @@
+name: Test Docker Compose
+
+on:
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test-docker-compose:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker
+        uses: docker/setup-buildx-action@v3
+
+      - name: Install Docker Compose v2
+        run: |
+          # Download and install docker compose v2
+          sudo mkdir -p /usr/local/lib/docker/cli-plugins
+          sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/lib/docker/cli-plugins/docker-compose
+          sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+
+      - name: Download and load docker-sonic-vs image
+        run: |
+          # Create directory for the image download
+          mkdir -p /tmp/docker-images
+
+          # Download docker-sonic-vs image from Azure Artifacts
+          echo "Downloading docker-sonic-vs image..."
+          curl -L "https://artprodcus3.artifacts.visualstudio.com/Af91412a5-a906-4990-9d7c-f697b81fc04d/be1b070f-be15-4154-aade-b1d3bfb17054/_apis/artifact/cGlwZWxpbmVhcnRpZmFjdDovL21zc29uaWMvcHJvamVjdElkL2JlMWIwNzBmLWJlMTUtNDE1NC1hYWRlLWIxZDNiZmIxNzA1NC9idWlsZElkLzEwMTQ0OTYvYXJ0aWZhY3ROYW1lL3NvbmljLWJ1aWxkaW1hZ2UudnM1/content?format=file&subpath=/target/docker-sonic-vs.gz" -o /tmp/docker-images/docker-sonic-vs.tar.gz
+
+          # Check if download was successful
+          if [ ! -f /tmp/docker-images/docker-sonic-vs.tar.gz ]; then
+            echo "Error: Failed to download docker-sonic-vs image"
+            exit 1
+          fi
+
+          echo "Loading docker-sonic-vs image..."
+          # Load the image into Docker
+          gunzip -c /tmp/docker-images/docker-sonic-vs.tar.gz | docker load
+
+          # Verify the image was loaded
+          if ! docker images | grep -q "docker-sonic-vs"; then
+            echo "Error: docker-sonic-vs image was not loaded properly"
+            exit 1
+          fi
+
+      - name: Validate Docker Compose file
+        run: |
+          # Validate the docker-compose.yml syntax
+          docker compose config --quiet
+
+      - name: Bring up all services
+        run: |
+          # Start all services with detached mode
+          docker compose up -d
+          
+          # Wait for containers to be ready
+          echo "Waiting for containers to start..."
+          sleep 10
+
+      - name: Verify all services are running
+        run: |
+          # Check that all containers are running
+          echo "Checking container status..."
+          docker compose ps -q | while read container; do
+            if [ -n "$container" ]; then
+              status=$(docker inspect --format='{{.State.Running}}' "$container")
+              echo "Container $container status: $status"
+              if [ "$status" != "true" ]; then
+                echo "Error: Container $container is not running"
+                exit 1
+              fi
+            fi
+          done
+
+      - name: Test show interface status command in spine container
+        run: |
+          # Test that we can execute "show interface status" command in spine container
+          echo "Testing show interface status in spine container..."
+          result=$(docker compose exec -T spine bash -c "show interface status" 2>&1)
+          if [ $? -ne 0 ]; then
+            echo "Error: Failed to run 'show interface status' in spine container"
+            echo "Output: $result"
+            exit 1
+          else
+            echo "Successfully executed 'show interface status' in spine container"
+          fi
+
+      - name: Test show interface status command in leaf1 container
+        run: |
+          # Test that we can execute "show interface status" command in leaf1 container
+          echo "Testing show interface status in leaf1 container..."
+          result=$(docker compose exec -T leaf1 bash -c "show interface status" 2>&1)
+          if [ $? -ne 0 ]; then
+            echo "Error: Failed to run 'show interface status' in leaf1 container"
+            echo "Output: $result"
+            exit 1
+          else
+            echo "Successfully executed 'show interface status' in leaf1 container"
+          fi
+
+      - name: Test show interface status command in leaf2 container
+        run: |
+          # Test that we can execute "show interface status" command in leaf2 container
+          echo "Testing show interface status in leaf2 container..."
+          result=$(docker compose exec -T leaf2 bash -c "show interface status" 2>&1)
+          if [ $? -ne 0 ]; then
+            echo "Error: Failed to run 'show interface status' in leaf2 container"
+            echo "Output: $result"
+            exit 1
+          else
+            echo "Successfully executed 'show interface status' in leaf2 container"
+          fi
+
+      - name: Cleanup
+        if: always()
+        run: |
+          # Ensure any leftover containers are cleaned up  
+          docker compose down --remove-orphans || true
