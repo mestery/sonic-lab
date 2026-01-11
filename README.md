@@ -3,6 +3,14 @@
 This is a test repository for sonic lab which uses docker-sonic-vs container
 images.
 
+## Start Colima
+
+Start colima with amd64 support using rosetta:
+
+```
+colima start --vm-type vz --vz-rosetta --cpu 4 --memory 8 --mount-type virtiofs
+```
+
 ## Starting the lab
 
 ```
