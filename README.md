@@ -23,6 +23,16 @@ Start colima with amd64 support using rosetta:
 colima start --vm-type vz --vz-rosetta --cpu 4 --memory 8 --mount-type virtiofs
 ```
 
+## Executing the script
+Make it executable:
+```
+chmod +X start.sh
+```
+Execute:
+```
+./start.sh
+```
+
 ## Starting the lab
 
 ```
