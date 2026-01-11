@@ -1,4 +1,5 @@
 # sonic-lab
+[![Test Docker Compose](https://github.com/mestery/sonic-lab/actions/workflows/test-docker-compose.yml/badge.svg)](https://github.com/mestery/sonic-lab/actions/workflows/test-docker-compose.yml)
 
 This is a test repository for sonic lab which uses docker-sonic-vs container
 images. The lab will build the following topology:
