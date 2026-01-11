@@ -1,0 +1,55 @@
+version: "3.9"
+
+networks:
+  spine-leaf1-link1:
+    driver: bridge
+    internal: true
+
+  spine-leaf1-link2:
+    driver: bridge
+    internal: true
+
+  spine-leaf2-link1:
+    driver: bridge
+    internal: true
+
+  spine-leaf2-link2:
+    driver: bridge
+    internal: true
+
+x-sonic-common: &sonic-common
+  image: docker-sonic-vs:latest
+  platform: linux/amd64
+  privileged: true
+  tty: true
+  shm_size: "2gb"
+  security_opt:
+    - seccomp=unconfined
+
+services:
+  spine:
+    <<: *sonic-common
+    container_name: sonic-spine
+    hostname: spine
+    networks:
+      spine-leaf1-link1:
+      spine-leaf1-link2:
+      spine-leaf2-link1:
+      spine-leaf2-link2:
+
+  leaf1:
+    <<: *sonic-common
+    container_name: sonic-leaf1
+    hostname: leaf1
+    networks:
+      spine-leaf1-link1:
+      spine-leaf1-link2:
+
+  leaf2:
+    <<: *sonic-common
+    container_name: sonic-leaf2
+    hostname: leaf2
+    networks:
+      spine-leaf2-link1:
+      spine-leaf2-link2:
+
