@@ -29,6 +29,21 @@ colima start --vm-type vz --vz-rosetta --cpu 4 --memory 8 --mount-type virtiofs
 docker compose up -d
 ```
 
+## Login to the containers
+
+To login to the containers and run commands on the spine:
+
+```
+docker exec -it sonic-spine bash
+```
+
+And on the leaf containers:
+
+```
+docker exec -it sonic-leaf1 bash
+docker exec -it sonic-leaf2 bash
+```
+
 ## Cleanup the lab
 
 ```
