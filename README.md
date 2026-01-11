@@ -23,20 +23,24 @@ Start colima with amd64 support using rosetta:
 colima start --vm-type vz --vz-rosetta --cpu 4 --memory 8 --mount-type virtiofs
 ```
 
-## Executing the script
-Make it executable:
+## Execute build script
+
+Confirm it is executable:
+
 ```
 chmod +X start.sh
 ```
-Execute:
+
+If you need the docker-sonic-vs image:
+
+```
+./start.sh -l
+```
+
+If it's already loaded:
+
 ```
 ./start.sh
-```
-
-## Starting the lab
-
-```
-docker compose up -d
 ```
 
 ## Login to the containers
