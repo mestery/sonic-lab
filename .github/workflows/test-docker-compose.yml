@@ -21,6 +21,14 @@ jobs:
           sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/lib/docker/cli-plugins/docker-compose
           sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
 
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            iproute2 \
+            util-linux \
+            jq
+
       - name: Download and load docker-sonic-vs image
         run: |
           # Create directory for the image download
@@ -61,7 +69,7 @@ jobs:
           sleep 90
 
           # Create veth interfaces
-          sudo ./create_vnet.ssh
+          sudo ./create_vnet.sh
 
           # Now, start the sonic containers
           docker compose up -d
