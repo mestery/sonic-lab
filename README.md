@@ -85,7 +85,7 @@ The script is idempotent and safe to re-run.
 Phase 3: Start SONiC containers
 
 ```bash
-docker compose up -docker
+docker compose up -d
 ```
 
 SONiC will attach to the pre-existing interfaces.

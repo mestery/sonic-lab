@@ -53,12 +53,22 @@ jobs:
 
       - name: Bring up all services
         run: |
-          # Start all services with detached mode
-          docker compose up -d
+          # Start all linux containers
+          docker compose up -d spine1-linux leaf1-linux leaf2-linux
           
           # Wait for containers to be ready
-          echo "Waiting for containers to start..."
-          sleep 10
+          echo "Waiting for linux containers to start..."
+          sleep 90
+
+          # Create veth interfaces
+          sudo ./create_vnet.ssh
+
+          # Now, start the sonic containers
+          docker compose up -d
+
+          # Now wait for sonic containers to be ready
+          echo "Waiting for sonic containers to start..."
+          sleep 60
 
       - name: Verify all services are running
         run: |
