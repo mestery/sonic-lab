@@ -1,22 +1,5 @@
 version: "3.9"
 
-networks:
-  spine-leaf1-link1:
-    driver: bridge
-    internal: true
-
-  spine-leaf1-link2:
-    driver: bridge
-    internal: true
-
-  spine-leaf2-link1:
-    driver: bridge
-    internal: true
-
-  spine-leaf2-link2:
-    driver: bridge
-    internal: true
-
 x-sonic-common: &sonic-common
   image: docker-sonic-vs:latest
   platform: linux/amd64
@@ -26,62 +9,74 @@ x-sonic-common: &sonic-common
   security_opt:
     - seccomp=unconfined
 
+x-debian-common: &debian-common
+  image: debian:bullseye
+  platform: linux/amd64
+  privileged: true
+  tty: true
+  volumes:
+    - ./init_linux.sh:/init_linux.sh:ro
+    - ./create_vnet.sh:/create_vnet.sh:ro
+    - /var/run/docker.sock:/var/run/docker.sock
+    - ./tmp/vnet_ready:/tmp/vnet_ready:rw
+  shm_size: "2gb"
+
 services:
-  spine:
+  ###########################
+  # Backing Linux containers #
+  ###########################
+
+  spine1-linux:
+    <<: *debian-common
+    container_name: spine1-linux
+    command: ["bash", "/init_linux.sh", "spine1-linux", "32"]
+
+  leaf1-linux:
+    <<: *debian-common
+    container_name: leaf1-linux
+    command: ["bash", "/init_linux.sh", "leaf1-linux", "32"]
+
+  leaf2-linux:
+    <<: *debian-common
+    container_name: leaf2-linux
+    command: ["bash", "/init_linux.sh", "leaf2-linux", "32"]
+
+  ###########################
+  # SONiC VS containers      #
+  ###########################
+
+  spine1:
     <<: *sonic-common
-    container_name: sonic-spine
-    hostname: spine
-    networks:
-      spine-leaf1-link1:
-      spine-leaf1-link2:
-      spine-leaf2-link1:
-      spine-leaf2-link2:
+    container_name: sonic-spine1
+    depends_on:
+      - spine1-linux
+    network_mode: "service:spine1-linux"
+    volumes:
+      - ./tmp/vnet_ready:/tmp/vnet_ready:ro
+      - /var/run/redis-vs/spine1:/var/run/redis
+      - ./sonic_entry.sh:/sonic_entry.sh:ro
+    entrypoint: ["/bin/bash", "/sonic_entry.sh", "spine1-linux"]
 
   leaf1:
     <<: *sonic-common
     container_name: sonic-leaf1
-    hostname: leaf1
-    networks:
-      spine-leaf1-link1:
-      spine-leaf1-link2:
+    depends_on:
+      - leaf1-linux
+    network_mode: "service:leaf1-linux"
+    volumes:
+      - ./tmp/vnet_ready:/tmp/vnet_ready:ro
+      - /var/run/redis-vs/leaf1:/var/run/redis
+      - ./sonic_entry.sh:/sonic_entry.sh:ro
+    entrypoint: ["/bin/bash", "/sonic_entry.sh", "leaf1-linux"]
 
   leaf2:
     <<: *sonic-common
     container_name: sonic-leaf2
-    hostname: leaf2
-    networks:
-      spine-leaf2-link1:
-      spine-leaf2-link2:
-
-  topology-init:
-    image: docker:26
-    container_name: sonic-topology-init
     depends_on:
-      - spine
-      - leaf1
-      - leaf2
+      - leaf2-linux
+    network_mode: "service:leaf2-linux"
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-    entrypoint: ["/bin/sh", "-c"]
-    command: >
-      "echo 'Waiting for SONiC spine to be ready...';
-      until docker exec sonic-spine sh -c 'sonic-cfggen -h >/dev/null 2>&1'; do
-        echo '  spine not ready yet...';
-        sleep 5;
-      done;
-      echo 'Running containers:';
-      docker ps --filter 'name=sonic-';
-      echo 'Sleep 30...';
-      sleep 30;
-      echo 'Configuring spine ports...';
-      docker exec sonic-spine sh -c 'config interface startup Ethernet0';
-      docker exec sonic-spine sh -c 'config interface startup Ethernet4';
-      docker exec sonic-spine sh -c 'config interface startup Ethernet8';
-      docker exec sonic-spine sh -c 'config interface startup Ethernet12';
-      echo 'Configuring leaf1 ports...';
-      docker exec sonic-leaf1 sh -c 'config interface startup Ethernet0';
-      docker exec sonic-leaf1 sh -c 'config interface startup Ethernet4';
-      echo 'Configuring leaf2 ports...';
-      docker exec sonic-leaf2 sh -c 'config interface startup Ethernet0';
-      docker exec sonic-leaf2 sh -c 'config interface startup Ethernet4';
-      echo 'Topology configured.'"
+      - ./tmp/vnet_ready:/tmp/vnet_ready:ro
+      - /var/run/redis-vs/leaf2:/var/run/redis
+      - ./sonic_entry.sh:/sonic_entry.sh:ro
+    entrypoint: ["/bin/bash", "/sonic_entry.sh", "leaf2-linux"]
