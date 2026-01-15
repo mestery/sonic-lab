@@ -76,7 +76,7 @@ jobs:
 
           # Now wait for sonic containers to be ready
           echo "Waiting for sonic containers to start..."
-          sleep 60
+          sleep 180
 
       - name: Verify all services are running
         run: |
