@@ -93,17 +93,17 @@ jobs:
             fi
           done
 
-      - name: Test show interface status command in spine container
+      - name: Test show interface status command in spine1 container
         run: |
-          # Test that we can execute "show interface status" command in spine container
-          echo "Testing show interface status in spine container..."
-          result=$(docker compose exec -T spine bash -c "show interface status" 2>&1)
+          # Test that we can execute "show interface status" command in spine1 container
+          echo "Testing show interface status in spine1 container..."
+          result=$(docker compose exec -T spine1 bash -c "show interface status" 2>&1)
           if [ $? -ne 0 ]; then
-            echo "Error: Failed to run 'show interface status' in spine container"
+            echo "Error: Failed to run 'show interface status' in spine1 container"
             echo "Output: $result"
             exit 1
           else
-            echo "Successfully executed 'show interface status' in spine container"
+            echo "Successfully executed 'show interface status' in spine1 container"
           fi
 
       - name: Test show interface status command in leaf1 container
