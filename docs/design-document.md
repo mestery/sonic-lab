@@ -38,10 +38,56 @@ The lab must be started in three phases:
     - docker compose up -d
 
 ## Collecting Topologogy Layout
-Example Input from User:
+Example YML file given as an arg (samples provided):
 
-SPINE, LEAF1, LEAF2
-SPINE-LEAF1 with eth1 eth1
-SPINE-LEAF1 with eth2 eth2
-SPINE-LEAF2 with eth3 eth1
-SPINE-LEAF2 with eth4 eth2
+topology:
+  name: spine-leaf-lab
+
+  switches:
+    spine1:
+      role: spine
+      asn: 65000
+      ports:
+        Ethernet0: {}
+        Ethernet4: {}
+        Ethernet8: {}
+        Ethernet12: {}
+
+    leaf1:
+      role: leaf
+      asn: 65101
+      ports:
+        Ethernet0: {}
+        Ethernet4: {}
+
+    leaf2:
+      role: leaf
+      asn: 65102
+      ports:
+        Ethernet0: {}
+        Ethernet4: {}
+
+  links:
+    - endpoints:
+        - device: spine1
+          port: Ethernet0
+        - device: leaf1
+          port: Ethernet0
+
+    - endpoints:
+        - device: spine1
+          port: Ethernet4
+        - device: leaf1
+          port: Ethernet4
+
+    - endpoints:
+        - device: spine1
+          port: Ethernet8
+        - device: leaf2
+          port: Ethernet0
+
+    - endpoints:
+        - device: spine1
+          port: Ethernet12
+        - device: leaf2
+          port: Ethernet4
