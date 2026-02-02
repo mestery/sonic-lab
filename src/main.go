@@ -7,13 +7,28 @@ license that can be found in the LICENSE file.
 package main
 
 import (
-    root "sonic-lab/cmd/root"
-    "sonic-lab/internal/parser"
-    // "github.com/mestery/sonic-lab/cmds/root"
-    // "github.com/mestery/sonic-lab/src/internal/parser"
+	"fmt"
+	"log"
+	"os"
+	reader "sonic-lab/internal/reader"
+	internal "sonic-lab/internal/writer"
 )
 
 func main() {
-    spine, leaf, link := root.Execute()
-    parser.Runner(spine, leaf, link)
+	if len(os.Args) < 2 {
+		fmt.Println("Usage: go main.go <.yml>")
+		os.Exit(1)
+	}
+
+	ymlPath := os.Args[1]
+	if err := reader.Run(ymlPath); err != nil {
+		fmt.Println("Error reading config:", err)
+		os.Exit(1)
+	}
+
+	writer := internal.New("./scripts")
+	if err := writer.Run(); err != nil {
+		fmt.Println("Error writing scripts:", err)
+		log.Fatal(err)
+	}
 }
