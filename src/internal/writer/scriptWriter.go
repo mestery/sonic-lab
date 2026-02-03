@@ -7,7 +7,6 @@ license that can be found in the LICENSE file.
 package internal
 
 import (
-	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -24,37 +23,15 @@ func New(outputDir string) *Writer {
 }
 
 func (w *Writer) Run() error {
-	files := []string{
-		"create_vnet.sh",
-		"docker-compose.yml",
-	}
-
 	if err := os.MkdirAll(w.OutputDir, 0o755); err != nil {
 		return err
 	}
 
-	writeStartScript("startt.sh")
-	writeEntryScript("sonic_entryy.sh")
-	writeInitScript("init_linuxx.sh")
-
-	for _, name := range files {
-		if err := w.writeBlank(name); err != nil {
-			return err
-		}
-	}
+	writeStartScript("start.sh")
+	writeEntryScript("sonic_entry.sh")
+	writeInitScript("init_linux.sh")
 
 	return nil
-}
-
-func (w *Writer) writeBlank(name string) error {
-	path := filepath.Join(w.OutputDir, name)
-
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o755)
-	if err != nil {
-		return fmt.Errorf("failed creating %s: %w", path, err)
-	}
-
-	return file.Close()
 }
 
 func writeInitScript(initScript string) {

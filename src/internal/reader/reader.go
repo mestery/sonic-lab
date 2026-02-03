@@ -7,7 +7,10 @@ license that can be found in the LICENSE file.
 package internal
 
 import (
+	"log"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -48,5 +51,47 @@ func Run(configPath string) error {
 		return err
 	}
 
+	// Create docker-compose and create_vnet scripts
+	generateDockerCompose()
+	generateCreateVnet()
+
 	return nil
+}
+
+func generateDockerCompose() {
+	data := []byte(`#!/usr/bin/env bash
+set -euo pipefail`)
+
+	writeDataToFile(data, "create_vnet.sh")
+}
+
+func generateCreateVnet() {
+	data := []byte(`version: "3.9"`)
+
+	writeDataToFile(data, "docker-compose.yml")
+}
+
+func writeDataToFile(data []byte, startScript string) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	desktopPath := filepath.Join(homeDir, "Desktop/sonic-lab")
+	filePath := filepath.Join(desktopPath, startScript)
+
+	subString := ".sh"
+	containsSh1 := strings.Contains(startScript, subString)
+
+	if containsSh1 { // .sh file (executable)
+		err = os.WriteFile(filePath, data, 0755)
+		if err != nil {
+			log.Fatal(err)
+		}
+	} else { // yml file
+		err = os.WriteFile(filePath, data, 0644)
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
 }
