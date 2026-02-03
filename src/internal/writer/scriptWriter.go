@@ -27,9 +27,9 @@ func (w *Writer) Run() error {
 		return err
 	}
 
-	writeStartScript("start.sh")
-	writeEntryScript("sonic_entry.sh")
-	writeInitScript("init_linux.sh")
+	//writeStartScript("start.sh")
+	//writeEntryScript("sonic_entry.sh")
+	//writeInitScript("init_linux.sh")
 
 	return nil
 }
