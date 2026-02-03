@@ -80,3 +80,4 @@ services:
       - /var/run/redis-vs/leaf2:/var/run/redis
       - ./sonic_entry.sh:/sonic_entry.sh:ro
     entrypoint: ["/bin/bash", "/sonic_entry.sh", "leaf2-linux"]
+    

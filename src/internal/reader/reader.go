@@ -7,9 +7,11 @@ license that can be found in the LICENSE file.
 package internal
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -59,10 +61,47 @@ func Run(configPath string) error {
 }
 
 func generateDockerCompose(cfg Config) {
-	data := []byte(`#!/usr/bin/env bash
-set -euo pipefail`)
+	var sb strings.Builder
 
-	writeDataToFile(data, "create_vnet.sh")
+	sb.WriteString("version: \"3.9\"\n")
+	sb.WriteString("x-sonic-common: &sonic-common\n  image: docker-sonic-vs:latest\n  platform: linux/amd64\n  privileged: true\n  tty: true\n  shm_size: \"2gb\"\n  security_opt:\n    - seccomp=unconfined\n\n")
+	sb.WriteString("x-debian-common: &debian-common\n  image: debian:bullseye\n  platform: linux/amd64\n  privileged: true\n  tty: true\n  volumes:\n    - ./init_linux.sh:/init_linux.sh:ro\n    - ./create_vnet.sh:/create_vnet.sh:ro\n    - /var/run/docker.sock:/var/run/docker.sock\n    - ./tmp/vnet_ready:/tmp/vnet_ready:rw\n  shm_size: \"2gb\"\n\n")
+
+	sb.WriteString("services:\n\t###########################\n\t# Backing Linux containers #\n\t###########################\n\n")
+
+	keys := make([]string, 0, len(cfg.Topology.Switches))
+	for k := range cfg.Topology.Switches {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	for _, name := range keys {
+		sw := cfg.Topology.Switches[name]
+		portCount := len(sw.Ports)
+
+		sb.WriteString(fmt.Sprintf("  %s-linux:\n", name))
+		sb.WriteString("    <<: *debian-common\n")
+		sb.WriteString(fmt.Sprintf("    container_name: %s-linux\n", name))
+		sb.WriteString(fmt.Sprintf("    command: [\"bash\", \"/init_linux.sh\", \"%[1]s-linux\", \"%[2]d\"]\n\n", name, portCount))
+	}
+
+	sb.WriteString("\t###########################\n\t# SONiC VS containers      #\n\t###########################\n\n")
+
+	for _, name := range keys {
+		sb.WriteString(fmt.Sprintf("  %s:\n", name))
+		sb.WriteString("    <<: *sonic-common\n")
+		sb.WriteString(fmt.Sprintf("    container_name: sonic-%s\n", name))
+		sb.WriteString("    depends_on:\n")
+		sb.WriteString(fmt.Sprintf("      - %s-linux\n", name))
+		sb.WriteString(fmt.Sprintf("    network_mode: \"service:%s-linux\"\n", name))
+		sb.WriteString("    volumes:\n")
+		sb.WriteString("      - ./tmp/vnet_ready:/tmp/vnet_ready:ro\n")
+		sb.WriteString(fmt.Sprintf("      - /var/run/redis-vs/%s:/var/run/redis\n", name))
+		sb.WriteString("      - ./sonic_entry.sh:/sonic_entry.sh:ro\n")
+		sb.WriteString(fmt.Sprintf("    entrypoint: [\"/bin/bash\", \"/sonic_entry.sh\", \"%s-linux\"]", name))
+	}
+
+	writeDataToFile([]byte(sb.String()), "docker-compose.yml")
 }
 
 func generateCreateVnet(cfg Config) {
