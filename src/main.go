@@ -10,25 +10,30 @@ import (
 	"fmt"
 	"log"
 	"os"
-	reader "sonic-lab/internal/reader"
-	internal "sonic-lab/internal/writer"
+
+	"sonic-lab/internal/reader"
+	"sonic-lab/internal/writer"
 )
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Println("Usage: go main.go <.yml>")
+		fmt.Println("Usage: sonic-lab <.yml> [output-dir]")
 		os.Exit(1)
 	}
 
 	ymlPath := os.Args[1]
-	if err := reader.Run(ymlPath); err != nil {
-		fmt.Println("Error reading config:", err)
-		os.Exit(1)
+	outputDir := "./scripts"
+	if len(os.Args) >= 3 {
+		outputDir = os.Args[2]
 	}
 
-	writer := internal.New("./scripts")
-	if err := writer.Run(); err != nil {
-		fmt.Println("Error writing scripts:", err)
-		log.Fatal(err)
+	if err := reader.Run(ymlPath, outputDir); err != nil {
+		log.Fatalf("Error reading config: %v", err)
 	}
+
+	if err := writer.New(outputDir).Run(); err != nil {
+		log.Fatalf("Error writing scripts: %v", err)
+	}
+
+	fmt.Printf("Wrote topology files to %s\n", outputDir)
 }

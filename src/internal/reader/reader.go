@@ -4,11 +4,10 @@ Use of this source code is governed by a BSD-style
 license that can be found in the LICENSE file.
 */
 
-package internal
+package reader
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -42,32 +41,45 @@ type Endpoint struct {
 	Port   string `yaml:"port"`
 }
 
-func Run(configPath string) error {
+// Run reads the topology config at configPath and writes the generated
+// docker-compose.yml and create_vnet.sh into outputDir.
+func Run(configPath, outputDir string) error {
 	data, err := os.ReadFile(configPath)
 	if err != nil {
-		return err
+		return fmt.Errorf("reading config: %w", err)
 	}
 
 	var cfg Config
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return err
+		return fmt.Errorf("parsing config: %w", err)
 	}
 
-	// Create docker-compose and create_vnet scripts
-	generateDockerCompose(cfg)
-	generateCreateVnet(cfg)
+	if err := os.MkdirAll(outputDir, 0o755); err != nil {
+		return fmt.Errorf("creating output dir %q: %w", outputDir, err)
+	}
+
+	if err := writeFile(filepath.Join(outputDir, "docker-compose.yml"), []byte(generateDockerCompose(cfg))); err != nil {
+		return fmt.Errorf("writing docker-compose.yml: %w", err)
+	}
+
+	if err := writeFile(filepath.Join(outputDir, "create_vnet.sh"), []byte(generateCreateVnet(cfg))); err != nil {
+		return fmt.Errorf("writing create_vnet.sh: %w", err)
+	}
 
 	return nil
 }
 
-func generateDockerCompose(cfg Config) {
+func generateDockerCompose(cfg Config) string {
 	var sb strings.Builder
 
 	sb.WriteString("version: \"3.9\"\n")
 	sb.WriteString("x-sonic-common: &sonic-common\n  image: docker-sonic-vs:latest\n  platform: linux/amd64\n  privileged: true\n  tty: true\n  shm_size: \"2gb\"\n  security_opt:\n    - seccomp=unconfined\n\n")
 	sb.WriteString("x-debian-common: &debian-common\n  image: debian:bullseye\n  platform: linux/amd64\n  privileged: true\n  tty: true\n  volumes:\n    - ./init_linux.sh:/init_linux.sh:ro\n    - ./create_vnet.sh:/create_vnet.sh:ro\n    - /var/run/docker.sock:/var/run/docker.sock\n    - ./tmp/vnet_ready:/tmp/vnet_ready:rw\n  shm_size: \"2gb\"\n\n")
 
-	sb.WriteString("services:\n\t###########################\n\t# Backing Linux containers #\n\t###########################\n\n")
+	sb.WriteString("services:\n")
+	sb.WriteString("  ###########################\n")
+	sb.WriteString("  # Backing Linux containers #\n")
+	sb.WriteString("  ###########################\n\n")
 
 	keys := make([]string, 0, len(cfg.Topology.Switches))
 	for k := range cfg.Topology.Switches {
@@ -85,9 +97,11 @@ func generateDockerCompose(cfg Config) {
 		sb.WriteString(fmt.Sprintf("    command: [\"bash\", \"/init_linux.sh\", \"%[1]s-linux\", \"%[2]d\"]\n\n", name, portCount))
 	}
 
-	sb.WriteString("\t###########################\n\t# SONiC VS containers      #\n\t###########################\n\n")
+	sb.WriteString("  ###########################\n")
+	sb.WriteString("  # SONiC VS containers      #\n")
+	sb.WriteString("  ###########################\n\n")
 
-	for _, name := range keys {
+	for i, name := range keys {
 		sb.WriteString(fmt.Sprintf("  %s:\n", name))
 		sb.WriteString("    <<: *sonic-common\n")
 		sb.WriteString(fmt.Sprintf("    container_name: sonic-%s\n", name))
@@ -98,13 +112,16 @@ func generateDockerCompose(cfg Config) {
 		sb.WriteString("      - ./tmp/vnet_ready:/tmp/vnet_ready:ro\n")
 		sb.WriteString(fmt.Sprintf("      - /var/run/redis-vs/%s:/var/run/redis\n", name))
 		sb.WriteString("      - ./sonic_entry.sh:/sonic_entry.sh:ro\n")
-		sb.WriteString(fmt.Sprintf("    entrypoint: [\"/bin/bash\", \"/sonic_entry.sh\", \"%s-linux\"]", name))
+		sb.WriteString(fmt.Sprintf("    entrypoint: [\"/bin/bash\", \"/sonic_entry.sh\", \"%s-linux\"]\n", name))
+		if i < len(keys)-1 {
+			sb.WriteString("\n")
+		}
 	}
 
-	writeDataToFile([]byte(sb.String()), "docker-compose.yml")
+	return sb.String()
 }
 
-func generateCreateVnet(cfg Config) {
+func generateCreateVnet(cfg Config) string {
 	var sb strings.Builder
 
 	sb.WriteString("#!/usr/bin/env bash\nset -euo pipefail\n\n")
@@ -112,7 +129,13 @@ func generateCreateVnet(cfg Config) {
 	sb.WriteString("# SONiC VS switch-to-switch veth setup\n")
 	sb.WriteString("# ----------------------------\n\n")
 
-	for name := range cfg.Topology.Switches {
+	keys := make([]string, 0, len(cfg.Topology.Switches))
+	for k := range cfg.Topology.Switches {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	for _, name := range keys {
 		varName := strings.ToUpper(strings.ReplaceAll(name, "-", "_"))
 		sb.WriteString(varName + "=" + name + "\n")
 	}
@@ -151,30 +174,14 @@ func generateCreateVnet(cfg Config) {
 	}
 
 	sb.WriteString("Topology Complete!\n")
-	writeDataToFile([]byte(sb.String()), "create_vnet.sh")
+	return sb.String()
 }
 
-func writeDataToFile(data []byte, startScript string) {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		log.Fatal(err)
+// writeFile writes data to path, making shell scripts executable.
+func writeFile(path string, data []byte) error {
+	var perm os.FileMode = 0o644
+	if strings.HasSuffix(path, ".sh") {
+		perm = 0o755
 	}
-
-	desktopPath := filepath.Join(homeDir, "Desktop/sonic-lab")
-	filePath := filepath.Join(desktopPath, startScript)
-
-	subString := ".sh"
-	containsSh1 := strings.Contains(startScript, subString)
-
-	if containsSh1 { // .sh file (executable)
-		err = os.WriteFile(filePath, data, 0755)
-		if err != nil {
-			log.Fatal(err)
-		}
-	} else { // yml file
-		err = os.WriteFile(filePath, data, 0644)
-		if err != nil {
-			log.Fatal(err)
-		}
-	}
+	return os.WriteFile(path, data, perm)
 }

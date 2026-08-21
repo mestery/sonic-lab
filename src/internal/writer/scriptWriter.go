@@ -4,10 +4,10 @@ Use of this source code is governed by a BSD-style
 license that can be found in the LICENSE file.
 */
 
-package internal
+package writer
 
 import (
-	"log"
+	"fmt"
 	"os"
 	"path/filepath"
 )
@@ -24,17 +24,25 @@ func New(outputDir string) *Writer {
 
 func (w *Writer) Run() error {
 	if err := os.MkdirAll(w.OutputDir, 0o755); err != nil {
-		return err
+		return fmt.Errorf("creating output dir %q: %w", w.OutputDir, err)
 	}
 
-	writeStartScript("start.sh")
-	writeEntryScript("sonic_entry.sh")
-	writeInitScript("init_linux.sh")
+	if err := w.writeStartScript(); err != nil {
+		return fmt.Errorf("writing start.sh: %w", err)
+	}
+
+	if err := w.writeEntryScript(); err != nil {
+		return fmt.Errorf("writing sonic_entry.sh: %w", err)
+	}
+
+	if err := w.writeInitScript(); err != nil {
+		return fmt.Errorf("writing init_linux.sh: %w", err)
+	}
 
 	return nil
 }
 
-func writeInitScript(initScript string) {
+func (w *Writer) writeInitScript() error {
 	data := []byte(`#!/usr/bin/env bash
 set -e
 echo "Initializing with arguments $@"
@@ -43,23 +51,13 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y iproute2 util-linux docker.io
 #/create_vnet.sh -n "$2" sw
 touch "/tmp/vnet_ready/$1"
 echo "vnet ready"
-sleep infinity`)
+sleep infinity
+`)
 
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	desktopPath := filepath.Join(homeDir, "Desktop/sonic-lab")
-	filePath := filepath.Join(desktopPath, initScript)
-
-	err = os.WriteFile(filePath, data, 0755)
-	if err != nil {
-		log.Fatal(err)
-	}
+	return os.WriteFile(filepath.Join(w.OutputDir, "init_linux.sh"), data, 0o755)
 }
 
-func writeEntryScript(entryScript string) {
+func (w *Writer) writeEntryScript() error {
 	data := []byte(`#!/usr/bin/env bash
 set -e
 
@@ -71,23 +69,13 @@ while [ ! -f "/tmp/vnet_ready/$1" ]; do
 done
 
 echo "vnet ready, starting SONiC..."
-exec /usr/local/bin/supervisord -n`)
+exec /usr/local/bin/supervisord -n
+`)
 
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	desktopPath := filepath.Join(homeDir, "Desktop/sonic-lab")
-	filePath := filepath.Join(desktopPath, entryScript)
-
-	err = os.WriteFile(filePath, data, 0755)
-	if err != nil {
-		log.Fatal(err)
-	}
+	return os.WriteFile(filepath.Join(w.OutputDir, "sonic_entry.sh"), data, 0o755)
 }
 
-func writeStartScript(startScript string) {
+func (w *Writer) writeStartScript() error {
 	data := []byte(`#!/usr/bin/env bash
 set -e
 
@@ -97,7 +85,7 @@ while getopts ":l" opt; do
     case "$opt" in
         l)
             echo "Loading docker-sonic-vs image..."
-            wget -P /tmp https://artprodcus3.artifacts.visualstudio.com/Af91412a5-a906-4990-9d7c-f697b81fc04d/be1b070f-be15-4154-aade-b1d3bfb17054/_apis/artifact/cGlwZWxpbmVhcnRpZmFjdDovL21zc29uaWMvcHJvamVjdElkL2JlMWIwNzBmLWJlMTUtNDE1NC1hYWRlLWIxZDNiZmIxNzA1NC9idWlsZElkLzEwMTQ0OTYvYXJ0aWZhY3ROYW1lL3NvbmljLWJ1aWxkaW1hZ2UudnM1/content?format=file&subpath=/target/docker-sonic-vs.gz
+            wget -P -o docker-sonic-vs.gz /tmp "https://artprodcus3.artifacts.visualstudio.com/Af91412a5-a906-4990-9d7c-f697b81fc04d/be1b070f-be15-4154-aade-b1d3bfb17054/_apis/artifact/cGlwZWxpbmVhcnRpZmFjdDovL21zc29uaWMvcHJvamVjdElkL2JlMWIwNzBmLWJlMTUtNDE1NC1hYWRlLWIxZDNiZmIxNzA1NC9idWlsZElkLzExOTc5NTIvYXJ0aWZhY3ROYW1lL3NvbmljLWJ1aWxkaW1hZ2UudnM1/content?format=file&subpath=/target/docker-sonic-vs.gz"
             docker load < /tmp/docker-sonic-vs.gz
             ;;
         ?)
@@ -115,18 +103,8 @@ docker compose up -d
 
 echo
 echo "Running containers:"
-docker ps --filter "name=sonic-"`)
+docker ps --filter "name=sonic-"
+`)
 
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	desktopPath := filepath.Join(homeDir, "Desktop/sonic-lab")
-	filePath := filepath.Join(desktopPath, startScript)
-
-	err = os.WriteFile(filePath, data, 0755)
-	if err != nil {
-		log.Fatal(err)
-	}
+	return os.WriteFile(filepath.Join(w.OutputDir, "start.sh"), data, 0o755)
 }
