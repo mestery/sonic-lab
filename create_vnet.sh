@@ -51,4 +51,4 @@ create_link "$SPINE1" "$LEAF1" "Ethernet0" "Ethernet0"
 create_link "$SPINE1" "$LEAF1" "Ethernet4" "Ethernet4"
 create_link "$SPINE1" "$LEAF2" "Ethernet8" "Ethernet0"
 create_link "$SPINE1" "$LEAF2" "Ethernet12" "Ethernet4"
-Topology Complete!
+echo "Topology Complete!"
