@@ -5,9 +5,9 @@ set -euo pipefail
 # SONiC VS switch-to-switch veth setup
 # ----------------------------
 
-SPINE1=spine1
-LEAF1=leaf1
-LEAF2=leaf2
+SPINE1=spine1-linux
+LEAF1=leaf1-linux
+LEAF2=leaf2-linux
 
 get_pid() {
   docker inspect -f '{{.State.Pid}}' "$1"
@@ -47,8 +47,8 @@ create_link() {
 }
 
 echo "Creating topology links..."
-create_link "spine1" "leaf1" "Ethernet0" "Ethernet0"
-create_link "spine1" "leaf1" "Ethernet4" "Ethernet4"
-create_link "spine1" "leaf2" "Ethernet8" "Ethernet0"
-create_link "spine1" "leaf2" "Ethernet12" "Ethernet4"
+create_link "$SPINE1" "$LEAF1" "Ethernet0" "Ethernet0"
+create_link "$SPINE1" "$LEAF1" "Ethernet4" "Ethernet4"
+create_link "$SPINE1" "$LEAF2" "Ethernet8" "Ethernet0"
+create_link "$SPINE1" "$LEAF2" "Ethernet12" "Ethernet4"
 Topology Complete!
