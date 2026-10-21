@@ -6,7 +6,7 @@ on:
 
 jobs:
   test-docker-compose:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -29,28 +29,19 @@ jobs:
             util-linux \
             jq
 
-      - name: Download and load docker-sonic-vs image
+      - name: Pull docker-sonic-vs image
         run: |
-          # Create directory for the image download
-          mkdir -p /tmp/docker-images
+          # Pull the arm64 docker-sonic-vs image from GHCR
+          echo "Pulling docker-sonic-vs image..."
+          docker pull ghcr.io/mestery/docker-sonic-vs:latest
 
-          # Download docker-sonic-vs image from Azure Artifacts
-          echo "Downloading docker-sonic-vs image..."
-          curl -L "https://artprodcus3.artifacts.visualstudio.com/Af91412a5-a906-4990-9d7c-f697b81fc04d/be1b070f-be15-4154-aade-b1d3bfb17054/_apis/artifact/cGlwZWxpbmVhcnRpZmFjdDovL21zc29uaWMvcHJvamVjdElkL2JlMWIwNzBmLWJlMTUtNDE1NC1hYWRlLWIxZDNiZmIxNzA1NC9idWlsZElkLzEyNTA3NjcvYXJ0aWZhY3ROYW1lL3NvbmljLWJ1aWxkaW1hZ2UudnM1/content?format=file&subpath=/target/docker-sonic-vs.gz" -o /tmp/docker-images/docker-sonic-vs.tar.gz
+          # The compose files reference docker-sonic-vs:latest, so retag
+          # the pulled image to match.
+          docker tag ghcr.io/mestery/docker-sonic-vs:latest docker-sonic-vs:latest
 
-          # Check if download was successful
-          if [ ! -f /tmp/docker-images/docker-sonic-vs.tar.gz ]; then
-            echo "Error: Failed to download docker-sonic-vs image"
-            exit 1
-          fi
-
-          echo "Loading docker-sonic-vs image..."
-          # Load the image into Docker
-          gunzip -c /tmp/docker-images/docker-sonic-vs.tar.gz | docker load
-
-          # Verify the image was loaded
+          # Verify the image is present
           if ! docker images | grep -q "docker-sonic-vs"; then
-            echo "Error: docker-sonic-vs image was not loaded properly"
+            echo "Error: docker-sonic-vs image is not present"
             exit 1
           fi
 
