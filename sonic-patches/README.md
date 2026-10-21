@@ -4,6 +4,14 @@ This directory contains a patch you need to build sonic-buildimage for arm64.
 Here is how you do that. This is assumed to be done on a Mac with an M-series
 chip with brew available.
 
+> **Just need the image?** A prebuilt arm64 `docker-sonic-vs` image is
+> available on GHCR, so you usually don't have to build it yourself:
+>
+> ```bash
+> docker pull ghcr.io/mestery/docker-sonic-vs:latest
+> docker tag ghcr.io/mestery/docker-sonic-vs:latest docker-sonic-vs:latest
+> ```
+
 ## Prerequisites: Docker and multipass
 
 Docker must be running on your Mac before you start, since the build process

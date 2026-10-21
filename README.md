@@ -75,12 +75,47 @@ flapped at runtime via a REST API.
 
 ## Host Requirements
 
-This lab is intended to run on macOS using **Colima** with amd64 emulation
-(Rosetta), since SONiC images are amd64-only.
+This lab is intended to run on macOS using **Colima**, or on Linux. Prebuilt
+`docker-sonic-vs` images are available for both amd64 and arm64 — see
+[Getting the `docker-sonic-vs` image](#getting-the-docker-sonic-vs-image).
 
 - Docker (via Colima)
 - At least 8 GB RAM allocated to Colima
 - `clang` is NOT required on the host (BPF is compiled inside the container)
+
+## Getting the `docker-sonic-vs` image
+
+The example topology uses the `docker-sonic-vs:latest` image. Which one you
+fetch depends on your CPU architecture:
+
+### Apple Silicon Macs (arm64)
+
+If you're on an M-series (arm64) Mac, pull the prebuilt arm64 image from
+GHCR and tag it so it matches the name the compose files reference:
+
+```bash
+docker pull ghcr.io/mestery/docker-sonic-vs:latest
+docker tag ghcr.io/mestery/docker-sonic-vs:latest docker-sonic-vs:latest
+```
+
+> The arm64 image runs natively on Apple Silicon, so you don't need Rosetta
+> for the SONiC containers.
+
+### x86_64 (amd64)
+
+If you're on Linux or an Intel machine (or emulating amd64), download the
+image tarball from Azure Artifacts and load it into Docker:
+
+```bash
+wget -O /tmp/docker-sonic-vs.gz "https://artprodcus3.artifacts.visualstudio.com/Af91412a5-a906-4990-9d7c-f697b81fc04d/be1b070f-be15-4154-aade-b1d3bfb17054/_apis/artifact/cGlwZWxpbmVhcnRpZmFjdDovL21zc29uaWMvcHJvamVjdElkL2JlMWIwNzBmLWJlMTUtNDE1NC1hYWRlLWIxZDNiZmIxNzA1NC9idWlsZElkLzEyNTA3NjcvYXJ0aWZhY3ROYW1lL3NvbmljLWJ1aWxkaW1hZ2UudnM1/content?format=file&subpath=/target/docker-sonic-vs.gz"
+gunzip -c /tmp/docker-sonic-vs.gz | docker load
+```
+
+Or let the convenience script do this for you (it fetches the amd64 image):
+
+```bash
+./start.sh -l
+```
 
 ## Quick Start
 
