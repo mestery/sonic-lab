@@ -98,6 +98,26 @@ func ifindexByName(name string) (int, error) {
 	return n, nil
 }
 
+// disableTxOffload disables TX checksum offload on ifname in the netns
+// owned by pid.
+//
+// veth pairs advertise hardware checksum offload, so the kernel queues
+// outgoing packets with CHECKSUM_PARTIAL and an unfilled L4 checksum,
+// expecting a real NIC to fill it in. Through the virtual switch that
+// never happens: the SAI VS userspace switch re-emits the bytes as-is
+// (CHECKSUM_NONE), so the far endpoint validates a garbage TCP checksum
+// and drops the packet. (ICMP is unaffected; it is always checksummed
+// in software.) Disabling TX offload makes the kernel fill in the
+// checksum before the packet enters the veth, fixing host-to-host TCP.
+//
+// Best-effort: a failure (ethtool missing, interface gone) is logged
+// and never blocks link creation.
+func disableTxOffload(pid int, ifname string) {
+	if err := run("nsenter", "-t", strconv.Itoa(pid), "-n", "ethtool", "-K", ifname, "tx", "off"); err != nil {
+		log.Printf("ethtool -K %s tx off in pid %d: %v", ifname, pid, err)
+	}
+}
+
 // createLink wires two veth pairs for a link through the webmesh namespace.
 //
 //
@@ -111,6 +131,10 @@ func ifindexByName(name string) (int, error) {
 // endpoints are moved into the respective switch namespaces and renamed
 // to the SONiC kernel interface names (ethN), which SAI VS maps to
 // logical ports (EthernetN) via the lane-based lanemap.
+//
+// The container-side endpoints are also given disabled TX checksum
+// offload (see disableTxOffload) so packets entering the veth pair
+// carry valid L4 checksums.
 //
 // The operation is idempotent: if either switch-side endpoint already
 // exists in its target namespace, the function returns nil.
@@ -127,9 +151,13 @@ func createLink(devA, portA string, nA int, devB, portB string, nB int) error {
 	ka := kernelIfname(portA)
 	kb := kernelIfname(portB)
 
-	// Idempotency: if either switch-side endpoint already exists, skip
+	// Idempotency: if either switch-side endpoint already exists, the
+	// wiring is done. Re-assert the TX offload setting in case the link
+	// predates it (webmesh upgrade, state-file loss), then skip.
 	if linkInNS(pidA, ka) || linkInNS(pidB, kb) {
 		log.Printf("link %s:%s <-> %s:%s already exists, skipping", devA, portA, devB, portB)
+		disableTxOffload(pidA, ka)
+		disableTxOffload(pidB, kb)
 		return nil
 	}
 
@@ -153,6 +181,8 @@ func createLink(devA, portA string, nA int, devB, portB string, nB int) error {
 		return fmt.Errorf("rename %s→%s in %s: %w", swA, ka, devA, err)
 	}
 
+	disableTxOffload(pidA, ka)
+
 	// --- Veth pair B: webmesh ↔ switch B ---
 	if err := run("ip", "link", "add", wmB, "type", "veth", "peer", "name", swB); err != nil {
 		cleanupWmPair(wmA)
@@ -170,6 +200,8 @@ func createLink(devA, portA string, nA int, devB, portB string, nB int) error {
 		cleanupWmPair(wmB)
 		return fmt.Errorf("rename %s→%s in %s: %w", swB, kb, devB, err)
 	}
+
+	disableTxOffload(pidB, kb)
 
 	// Label the webmesh-side endpoints so `ip link` shows what they connect to
 	runQuiet("ip", "link", "set", wmA, "alias", devA+":"+portA)

@@ -30,6 +30,7 @@ RUN apt-get update && \
         docker.io \
         iproute2 \
         util-linux \
+        ethtool \
         curl \
         ca-certificates && \
     rm -rf /var/lib/apt/lists/*
