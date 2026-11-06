@@ -27,24 +27,32 @@ const filterName = "patch_panel"
 // the interface with the given link index.
 //
 // AttachTC is idempotent per process: it returns nil if this process
-// already attached the filter. If a filter named "patch_panel" is
-// present but was attached by a previous webmesh process — the kernel
-// keeps it alive after the loader exits, and its program's maps are
-// empty in the new process — it is deleted and replaced with the
-// current program so traffic flows through the current maps again.
+// already attached the filter and it is still present. If a filter
+// named "patch_panel" is present but was attached by a previous
+// webmesh process — the kernel keeps it alive after the loader exits,
+// and its program's maps are empty in the new process — it is deleted
+// and replaced with the current program so traffic flows through the
+// current maps again.
+//
+// The per-process "already attached" shortcut is only taken when a
+// "patch_panel" filter is actually present on the link. The kernel
+// reuses ifindexes after deletion, so a recreated interface can
+// inherit a stale map entry while carrying no filter.
 func (p *PatchPanel) AttachTC(linkIdx int) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-
-	if p.attached[linkIdx] {
-		return nil
-	}
 
 	link, err := netlink.LinkByIndex(linkIdx)
 	if err != nil {
 		return fmt.Errorf("lookup link ifidx %d: %w", linkIdx, err)
 	}
 	ifname := link.Attrs().Name
+
+	// Idempotent fast path: this process attached the filter and it is
+	// still present on the link.
+	if p.attached[linkIdx] && hasFilter(link) {
+		return nil
+	}
 
 	// Ensure the ingress qdisc exists (idempotent). We use the tc CLI
 	// because the netlink library's QdiscAdd is rejected by some kernel
@@ -117,6 +125,21 @@ func (p *PatchPanel) DetachTC(linkIdx int) error {
 		return fmt.Errorf("remove BPF filter on %s: %w", link.Attrs().Name, err)
 	}
 	return nil
+}
+
+// hasFilter reports whether a BPF filter named filterName is attached
+// to the link on the ingress parent.
+func hasFilter(link netlink.Link) bool {
+	filters, err := netlink.FilterList(link, tcIngressParent)
+	if err != nil {
+		return false
+	}
+	for _, f := range filters {
+		if bf, ok := f.(*netlink.BpfFilter); ok && bf.Name == filterName {
+			return true
+		}
+	}
+	return false
 }
 
 
