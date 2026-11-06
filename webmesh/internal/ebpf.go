@@ -9,6 +9,7 @@ package webmesh
 import (
 	"fmt"
 	"log"
+	"sync"
 
 	"github.com/cilium/ebpf"
 )
@@ -25,6 +26,15 @@ type PatchPanel struct {
 	linkMap  *ebpf.Map
 	statsMap *ebpf.Map
 	coll     *ebpf.Collection
+
+	// mu guards attached. The kernel keeps a TC filter alive after the
+	// loader process exits (the filter holds a reference to the
+	// program), so after an in-place restart a "patch_panel" filter on
+	// a surviving wm-ethN interface may belong to a dead process.
+	// attached records the links this process attached, so AttachTC can
+	// tell its own idempotent re-calls apart from stale filters.
+	mu       sync.Mutex
+	attached map[int]bool
 }
 
 // LoadPatchPanel loads the compiled eBPF object file and returns handles
@@ -69,6 +79,7 @@ func LoadPatchPanel(objFile string) (*PatchPanel, error) {
 		linkMap:  linkMap,
 		statsMap: statsMap,
 		coll:     coll,
+		attached: make(map[int]bool),
 	}, nil
 }
 

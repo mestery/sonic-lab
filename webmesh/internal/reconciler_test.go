@@ -234,6 +234,42 @@ func TestVerifyLinksRemovesMissingInterfaces(t *testing.T) {
 	}
 }
 
+func TestReconcileAdoptsOnce(t *testing.T) {
+	r := newTestReconciler(t)
+	link := Link{
+		Endpoints: []Endpoint{
+			{Device: "spine1-linux", Port: "Ethernet0"},
+			{Device: "leaf1-linux", Port: "Ethernet0"},
+		},
+	}
+	key := link.Key()
+	r.mu.Lock()
+	// A link that is both desired and applied: nothing for the create
+	// or delete passes to do, so the only observable effect of the
+	// first Reconcile is the one-shot adoption pass (a no-op with a
+	// nil panel).
+	r.desired[key] = link
+	r.applied[key] = link
+	r.mu.Unlock()
+
+	if r.adopted {
+		t.Fatal("adopted = true before any Reconcile")
+	}
+	r.Reconcile()
+	if !r.adopted {
+		t.Error("adopted not set after first Reconcile")
+	}
+	if r.AppliedCount() != 1 {
+		t.Errorf("AppliedCount = %d, want 1", r.AppliedCount())
+	}
+
+	// A second pass must not re-run the adoption, and must be a no-op.
+	r.Reconcile()
+	if r.AppliedCount() != 1 {
+		t.Errorf("AppliedCount after second Reconcile = %d, want 1", r.AppliedCount())
+	}
+}
+
 func TestWmNumAllocation(t *testing.T) {
 	r := newTestReconciler(t)
 	a := Endpoint{Device: "spine1-a-very-long-suffix", Port: "Ethernet60"}
