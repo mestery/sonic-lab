@@ -10,6 +10,7 @@ package webmesh
 
 import (
 	"fmt"
+	"log"
 	"os/exec"
 	"strings"
 
@@ -74,6 +75,7 @@ func (p *PatchPanel) AttachTC(linkIdx int) error {
 	}
 	for _, f := range existing {
 		if bf, ok := f.(*netlink.BpfFilter); ok && bf.Name == filterName {
+			log.Printf("stale %s filter on %s (ifidx %d); replacing", filterName, ifname, linkIdx)
 			if err := netlink.FilterDel(bf); err != nil {
 				return fmt.Errorf("remove stale BPF filter on %s: %w", ifname, err)
 			}
