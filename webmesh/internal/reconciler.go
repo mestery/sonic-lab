@@ -33,6 +33,7 @@ type Reconciler struct {
 	topoMtime    time.Time
 	interval     time.Duration
 	panel        *PatchPanel // may be nil if eBPF is unavailable
+	adopted      bool        // set once, after the startup eBPF adoption pass
 }
 
 // NewReconciler creates a Reconciler that persists state to stateFile.
@@ -107,6 +108,16 @@ func (r *Reconciler) RemoveLink(key string) error {
 func (r *Reconciler) Reconcile() (created, deleted int, errs []string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	// One-shot: if applied links were restored from the state file but
+	// their wm-ethN interfaces survived this process's restart, the
+	// kernel still runs the previous process's eBPF program against its
+	// (now empty) maps while the fresh maps sit unused. Rebuild the maps
+	// and re-attach the current program before the create/delete passes.
+	if !r.adopted {
+		r.adopted = true
+		r.adoptExisting()
+	}
 
 	// Create missing links in key order, so pushing the same topology to a
 	// fresh webmesh always gives the same wm-ethN numbering
@@ -208,6 +219,55 @@ func (r *Reconciler) verifyLinks() {
 			runQuiet("ip", "link", "set", wmB, "up")
 			log.Printf("verify: brought link %s back up", key)
 		}
+	}
+}
+
+// adoptExisting re-registers applied links with the freshly loaded eBPF
+// patch panel. On a webmesh process restart the kernel keeps the
+// previous process's unpinned program and TC filters alive (the filters
+// hold references to it), but the new process's maps are empty: traffic
+// hitting a stale filter is dropped and its stats stay at zero.
+//
+// For every applied link whose wm-ethN interfaces still exist, it
+// rewrites the BPF map entries and re-attaches the current program
+// (AttachTC replaces any stale filter). Links whose interfaces are gone
+// are skipped; verifyLinks notices and the create path re-attaches when
+// it re-creates them. Runs once, on the first Reconcile after startup.
+// Caller must hold r.mu.
+func (r *Reconciler) adoptExisting() {
+	if r.panel == nil {
+		return
+	}
+	keys := make([]string, 0, len(r.applied))
+	for key := range r.applied {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	adopted := 0
+	for _, key := range keys {
+		link := r.applied[key]
+		wmA, wmB := r.wmNames(link)
+		idxA, errA := ifindexByName(wmA)
+		idxB, errB := ifindexByName(wmB)
+		if errA != nil || errB != nil {
+			// Interface did not survive (e.g. the container's netns was
+			// recreated). Leave it to verifyLinks and the create path.
+			continue
+		}
+		if err := r.panel.UpdateLink(uint32(idxA), uint32(idxB)); err != nil {
+			log.Printf("adopt %s: %v", key, err)
+			continue
+		}
+		if err := r.panel.AttachTC(idxA); err != nil {
+			log.Printf("adopt %s (tc %s): %v", key, wmA, err)
+		}
+		if err := r.panel.AttachTC(idxB); err != nil {
+			log.Printf("adopt %s (tc %s): %v", key, wmB, err)
+		}
+		adopted++
+	}
+	if adopted > 0 {
+		log.Printf("adopted %d existing links into the eBPF patch panel", adopted)
 	}
 }
 
