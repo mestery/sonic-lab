@@ -136,8 +136,12 @@ func disableTxOffload(pid int, ifname string) {
 // offload (see disableTxOffload) so packets entering the veth pair
 // carry valid L4 checksums.
 //
-// The operation is idempotent: if either switch-side endpoint already
-// exists in its target namespace, the function returns nil.
+// The operation is idempotent: if both switch-side endpoints already
+// exist in their target namespaces, the function returns nil. If only
+// one exists (e.g. the other container was recreated and its veth pair
+// torn down), only the missing veth pair is created. The surviving pair
+// is left untouched so the surviving switch's SONiC association is
+// preserved.
 func createLink(devA, portA string, nA int, devB, portB string, nB int) error {
 	pidA, err := containerPID(devA)
 	if err != nil {
@@ -151,70 +155,74 @@ func createLink(devA, portA string, nA int, devB, portB string, nB int) error {
 	ka := kernelIfname(portA)
 	kb := kernelIfname(portB)
 
-	// Idempotency: if either switch-side endpoint already exists, the
-	// wiring is done. Re-assert the TX offload setting in case the link
-	// predates it (webmesh upgrade, state-file loss), then skip.
-	if linkInNS(pidA, ka) || linkInNS(pidB, kb) {
+	existsA := linkInNS(pidA, ka)
+	existsB := linkInNS(pidB, kb)
+
+	// Idempotency: both switch-side endpoints already exist. Re-assert
+	// the TX offload setting in case the link predates it (webmesh
+	// upgrade, state-file loss), then skip.
+	if existsA && existsB {
 		log.Printf("link %s:%s <-> %s:%s already exists, skipping", devA, portA, devB, portB)
 		disableTxOffload(pidA, ka)
 		disableTxOffload(pidB, kb)
 		return nil
 	}
 
-	wmA := wmIfname(nA)
-	swA := swIfname(nA)
-	wmB := wmIfname(nB)
-	swB := swIfname(nB)
-
-	// --- Veth pair A: webmesh ↔ switch A ---
-	if err := run("ip", "link", "add", wmA, "type", "veth", "peer", "name", swA); err != nil {
-		return fmt.Errorf("create veth %s<->%s: %w", wmA, swA, err)
+	// Create only the missing veth pair(s). When one end survives (the
+	// other container was recreated and its veth pair torn down), the
+	// surviving pair is left untouched: recreating it would replace the
+	// surviving switch's veth and break its SONiC association.
+	if !existsA {
+		if err := createVethPair(nA, devA, portA, pidA); err != nil {
+			return fmt.Errorf("create veth pair for %s:%s: %w", devA, portA, err)
+		}
+	}
+	if !existsB {
+		if err := createVethPair(nB, devB, portB, pidB); err != nil {
+			// If we just created pair A and pair B fails, roll back A.
+			if !existsA {
+				cleanupWmPair(wmIfname(nA))
+			}
+			return fmt.Errorf("create veth pair for %s:%s: %w", devB, portB, err)
+		}
 	}
 
-	if err := run("ip", "link", "set", swA, "netns", strconv.Itoa(pidA)); err != nil {
-		cleanupWmPair(wmA)
-		return fmt.Errorf("move %s → %s: %w", swA, devA, err)
+	log.Printf("created link %s:%s <-> %s:%s (wm: %s, %s)",
+		devA, portA, devB, portB, wmIfname(nA), wmIfname(nB))
+	return nil
+}
+
+// createVethPair creates one veth pair: the webmesh-side endpoint
+// (wm-ethN) stays in the webmesh namespace, the peer is moved into the
+// container's netns and renamed to the SONiC kernel interface name.
+// On failure it removes any partially created interface.
+func createVethPair(n int, dev, port string, pid int) error {
+	wm := wmIfname(n)
+	sw := swIfname(n)
+	ka := kernelIfname(port)
+
+	if err := run("ip", "link", "add", wm, "type", "veth", "peer", "name", sw); err != nil {
+		return fmt.Errorf("create veth %s<->%s: %w", wm, sw, err)
+	}
+	if err := run("ip", "link", "set", sw, "netns", strconv.Itoa(pid)); err != nil {
+		cleanupWmPair(wm)
+		return fmt.Errorf("move %s → %s: %w", sw, dev, err)
+	}
+	if err := run("nsenter", "-t", strconv.Itoa(pid), "-n", "ip", "link", "set", sw, "name", ka); err != nil {
+		cleanupWmPair(wm)
+		return fmt.Errorf("rename %s→%s in %s: %w", sw, ka, dev, err)
 	}
 
-	if err := run("nsenter", "-t", strconv.Itoa(pidA), "-n", "ip", "link", "set", swA, "name", ka); err != nil {
-		cleanupWmPair(wmA)
-		return fmt.Errorf("rename %s→%s in %s: %w", swA, ka, devA, err)
-	}
+	// Label the webmesh-side endpoint so `ip link` shows what it connects to.
+	runQuiet("ip", "link", "set", wm, "alias", dev+":"+port)
 
-	disableTxOffload(pidA, ka)
+disableTxOffload(pid, ka)
 
-	// --- Veth pair B: webmesh ↔ switch B ---
-	if err := run("ip", "link", "add", wmB, "type", "veth", "peer", "name", swB); err != nil {
-		cleanupWmPair(wmA)
-		return fmt.Errorf("create veth %s<->%s: %w", wmB, swB, err)
-	}
+	// Bring up both ends (best-effort).
+	runQuiet("ip", "link", "set", wm, "up")
+	runQuiet("nsenter", "-t", strconv.Itoa(pid), "-n", "ip", "link", "set", ka, "up")
 
-	if err := run("ip", "link", "set", swB, "netns", strconv.Itoa(pidB)); err != nil {
-		cleanupWmPair(wmA)
-		cleanupWmPair(wmB)
-		return fmt.Errorf("move %s → %s: %w", swB, devB, err)
-	}
-
-	if err := run("nsenter", "-t", strconv.Itoa(pidB), "-n", "ip", "link", "set", swB, "name", kb); err != nil {
-		cleanupWmPair(wmA)
-		cleanupWmPair(wmB)
-		return fmt.Errorf("rename %s→%s in %s: %w", swB, kb, devB, err)
-	}
-
-	disableTxOffload(pidB, kb)
-
-	// Label the webmesh-side endpoints so `ip link` shows what they connect to
-	runQuiet("ip", "link", "set", wmA, "alias", devA+":"+portA)
-	runQuiet("ip", "link", "set", wmB, "alias", devB+":"+portB)
-
-	// Bring up all four endpoints (best-effort)
-	runQuiet("ip", "link", "set", wmA, "up")
-	runQuiet("ip", "link", "set", wmB, "up")
-	runQuiet("nsenter", "-t", strconv.Itoa(pidA), "-n", "ip", "link", "set", ka, "up")
-	runQuiet("nsenter", "-t", strconv.Itoa(pidB), "-n", "ip", "link", "set", kb, "up")
-
-	log.Printf("created link %s:%s <-> %s:%s (kernel: %s, %s; wm: %s, %s)",
-		devA, portA, devB, portB, ka, kb, wmA, wmB)
+	log.Printf("created veth pair %s:%s (wm: %s, kernel: %s)", dev, port, wm, ka)
 	return nil
 }
 
