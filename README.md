@@ -6,6 +6,24 @@ container images. The lab builds a simple spine–leaf topology using an
 eBPF-powered **webmesh** patch panel container for dynamic, API-driven
 network wiring between switches.
 
+## Very Quick Start for Mac with Colima
+
+Assuming colima and docker are installed and running, pull the ARM64 sonic image
+
+```bash
+docker pull ghcr.io/mestery/docker-sonic-vs:latest
+docker tag ghcr.io/mestery/docker-sonic-vs:latest docker-sonic-vs:latest
+```
+
+Then you should be able to start the topology in the `example` directory
+with the command
+
+```bash
+./start.sh
+```
+
+See the quick start section below for more details.
+
 ## Repository Layout
 
 ```
@@ -104,9 +122,6 @@ docker pull ghcr.io/mestery/docker-sonic-vs:latest
 docker tag ghcr.io/mestery/docker-sonic-vs:latest docker-sonic-vs:latest
 ```
 
-> The arm64 image runs natively on Apple Silicon, so you don't need Rosetta
-> for the SONiC containers.
-
 ### x86_64 (amd64)
 
 If you're on Linux or an Intel machine (or emulating amd64), download the
@@ -125,19 +140,38 @@ Or let the convenience script do this for you (it fetches the amd64 image):
 
 ## Quick Start
 
+> **Note:** If you install docker via homebrew, the `compose` subcommand
+> may not be set up. If `docker compose version` fails, try adding the 
+> following to `~/.docker/config.json`:
+>
+> ```json
+>   "cliPluginsExtraDirs": [
+>     "/opt/homebrew/lib/docker/cli-plugins"
+>   ]
+> ```
+
 ### 1. Start Colima
 
 ```bash
-colima start --vm-type vz --vz-rosetta --cpu 4 --memory 8 --mount-type virtiofs
+colima start --vm-type vz --cpu 4 --memory 8 --mount-type virtiofs
 ```
 
+> The CPU and memory values above are a reasonable minimum. If your machine
+> has more resources available, you can increase `--cpu` and `--memory`.
+
 ### 2. Build images
+
+This step is not necessary if you loaded the image as described above.  Skip
+to the next section.
 
 ```bash
 docker compose -f example/docker-compose.yml build
 ```
 
 Or use the convenience script (also pulls the SONiC image on first run):
+
+> **Note:** Use `-l` only on x86 machines. This flag will download the
+> x86 version of the docker sonic image and overwrite an existing ARM64 image.
 
 ```bash
 ./start.sh -l
@@ -195,14 +229,12 @@ Base URL: `http://localhost:8092`
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/v1/topology` | GET | Current desired topology |
-| `/v1/topology` | PUT | Replace desired topology (YAML or JSON) |
+| `/v1/status` | GET | Healthcheck (desired == applied) |
+| `/v1/topology` | PUT | Replace desired topology (JSON) |
 | `/v1/links` | GET | List all links with state + stats |
 | `/v1/links/{key}` | GET | Inspect a single link |
 | `/v1/links/{key}/up` | POST | Bring a link up |
 | `/v1/links/{key}/down` | POST | Take a link down (flap) |
-| `/v1/stats` | GET | Aggregate eBPF stats |
-| `/v1/health` | GET | Healthcheck (desired == applied) |
 
 ### Example: Flap a link
 
@@ -220,7 +252,7 @@ curl -X POST http://localhost:8092/v1/links/spine1-leaf1/up
 ### Example: View link stats
 
 ```bash
-curl -s http://localhost:8092/v1/stats | python3 -m json.tool
+curl -s http://localhost:8092/v1/links | python3 -m json.tool
 ```
 
 ## Topology File
