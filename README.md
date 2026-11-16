@@ -15,8 +15,7 @@ docker pull ghcr.io/mestery/docker-sonic-vs:latest
 docker tag ghcr.io/mestery/docker-sonic-vs:latest docker-sonic-vs:latest
 ```
 
-Then you should be able to start the topology in the `example` directory
-with the command
+Then you should be able to start the topology with the command
 
 ```bash
 ./start.sh
