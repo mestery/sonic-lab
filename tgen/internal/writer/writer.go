@@ -386,6 +386,20 @@ func (w *Writer) writeEntryScript() error {
 	vtysh -f /tmp/frr.conf || echo "WARNING: vtysh -f returned non-zero"
 	echo "FRR configuration loaded"
 
+	# Enable IPv6 forwarding on every SONiC container, unconditionally.
+	# Multi-hop topologies (ring, spine-leaf) require intermediate nodes
+	# to transit SRv6/underlay packets; the kernel default (0) silently
+	# drops transit traffic. This must stay OUTSIDE the /srv6.routes
+	# guard below: spines are transit-only and never receive a routes
+	# file, so a guard here would leave them blackholing every
+	# cross-leaf packet. Harmless on nodes that never forward.
+	sysctl -w net.ipv6.conf.all.forwarding=1 2>/dev/null || true
+	sysctl -w net.ipv6.conf.default.forwarding=1 2>/dev/null || true
+	for iface in $(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | grep -E '^(Ethernet|Loopback)'); do
+	echo 1 > "/proc/sys/net/ipv6/conf/$iface/forwarding" 2>/dev/null || true
+	done
+	echo "Enabled IPv6 forwarding on all interfaces"
+
 	# If SRv6 routes file is present, enable seg6 on all interfaces and
 	# execute the routes script to program kernel seg6 routes.
 	if [ -f /srv6.routes ]; then
@@ -399,18 +413,6 @@ func (w *Writer) writeEntryScript() error {
 	echo 1 > "/proc/sys/net/ipv6/conf/$iface/seg6_enabled" 2>/dev/null || true
 	done
 	echo "Enabled seg6_enabled=1 on all interfaces"
-
-	# Enable IPv6 forwarding. Multi-hop topologies (ring, spine-leaf)
-	# require intermediate nodes to transit SRv6/underlay packets; the
-	# kernel default (0) silently drops transit traffic. In a full mesh
-	# every pair is directly connected so forwarding is never needed,
-	# but enabling it is harmless and required for ring/clos.
-	sysctl -w net.ipv6.conf.all.forwarding=1 2>/dev/null || true
-	sysctl -w net.ipv6.conf.default.forwarding=1 2>/dev/null || true
-	for iface in $(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | grep -E '^(Ethernet|Loopback)'); do
-	echo 1 > "/proc/sys/net/ipv6/conf/$iface/forwarding" 2>/dev/null || true
-	done
-	echo "Enabled IPv6 forwarding on all interfaces"
 
 	echo "Loading SRv6 overlay routes..."
 	if bash /srv6.routes; then

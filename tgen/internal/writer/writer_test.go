@@ -609,6 +609,22 @@ func TestSRv6_EntryScript(t *testing.T) {
 	if !strings.Contains(script, "if bash /srv6.routes; then") {
 		t.Error("entry script must branch on the /srv6.routes exit status")
 	}
+
+	// IPv6 forwarding is required on transit nodes (spines). Spines
+	// never receive a /srv6.routes file, so the forwarding sysctls must
+	// live OUTSIDE the "[ -f /srv6.routes ]" guard — a regression that
+	// nests them re-introduces silent cross-leaf blackholing. Assert
+	// the forwarding block appears before the guard, not inside it.
+	fwdIdx := strings.Index(script, "net.ipv6.conf.all.forwarding=1")
+	guardIdx := strings.Index(script, "if [ -f /srv6.routes ]; then")
+	switch {
+	case fwdIdx < 0:
+		t.Error("missing IPv6 forwarding enablement in entry script")
+	case guardIdx < 0:
+		t.Error("missing /srv6.routes guard in entry script")
+	case fwdIdx > guardIdx:
+		t.Error("IPv6 forwarding must be enabled before (and unconditionally to) the /srv6.routes guard")
+	}
 }
 
 func TestNetnsSuffix_ComposeAndNeighbors(t *testing.T) {
