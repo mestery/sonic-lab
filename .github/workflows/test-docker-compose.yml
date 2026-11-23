@@ -230,9 +230,11 @@ jobs:
             pingok=1
             for f in "$DIR"/srv6/*.routes; do
               s=$(basename "$f" .routes)
+              # Skip spine nodes — they are transit-only, not overlay endpoints.
+              [[ "$s" == spine* ]] && continue
               src=$(grep "Overlay prefix:" "$f" | awk '{print $NF}' | sed 's#/64##')
               # Destinations = every leaf's overlay prefix except the sender's own.
-              for dst in $(grep -h "Overlay prefix:" "$DIR"/srv6/*.routes | awk '{print $NF}' | sed 's#/64##' | grep -v "^${src}\$"); do
+              for dst in $(grep -h "Overlay prefix:" "$DIR"/srv6/leaf*.routes | awk '{print $NF}' | sed 's#/64##' | grep -v "^${src}\$"); do
                 docker exec "sonic-$s" ping -6 -c 3 -W 2 -I "${src}1" "${dst}1" >/dev/null 2>&1 || pingok=0
               done
             done
