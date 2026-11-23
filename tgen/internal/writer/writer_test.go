@@ -599,6 +599,42 @@ func TestCompose_EachImageBuiltOnce(t *testing.T) {
 	}
 }
 
+// TestEntryScript_DisablesIPv6OnDataVeths pins the fix for issue #45:
+// IPv6 must be disabled on the raw ethN veths (but not eth0, the Docker
+// management interface) before SONiC starts, otherwise every packet to a
+// global address is accepted twice (ethN + the EthernetN tap) and pings
+// see duplicate replies.
+func TestEntryScript_DisablesIPv6OnDataVeths(t *testing.T) {
+	tt := mustGenerate(t, topo.Options{Spines: 1, Leaves: 1})
+	dir := t.TempDir()
+	w := New(dir, tt)
+
+	if err := w.writeEntryScript(); err != nil {
+		t.Fatalf("writeEntryScript error: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "sonic_entry.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(data)
+
+	disableIdx := strings.Index(script, `"net.ipv6.conf.$iface.disable_ipv6=1"`)
+	if disableIdx < 0 {
+		t.Fatal("entry script must disable IPv6 on data-plane ethN veths")
+	}
+	if !strings.Contains(script, `[ "$iface" = "eth0" ] && continue`) {
+		t.Error("entry script must skip eth0 (management) when disabling IPv6")
+	}
+	if strings.Contains(script, "net.ipv6.conf.default.disable_ipv6") ||
+		strings.Contains(script, "net.ipv6.conf.all.disable_ipv6") {
+		t.Error("must not disable IPv6 globally: EthernetN taps need it")
+	}
+	// Must run before supervisord starts syncd/bgpd.
+	if supIdx := strings.Index(script, "/usr/local/bin/supervisord"); supIdx < 0 || disableIdx > supIdx {
+		t.Error("IPv6 must be disabled on ethN before supervisord starts")
+	}
+}
+
 func TestSRv6_EntryScript(t *testing.T) {
 	tt := mustGenerate(t, topo.Options{Spines: 1, Leaves: 1, SRv6: true})
 	dir := t.TempDir()

@@ -319,7 +319,26 @@ func (w *Writer) writeEntryScript() error {
 	sleep 3
 	done
 
-	echo "vnet ready, starting SONiC..."
+	echo "vnet ready"
+
+	# Disable IPv6 on the raw data-plane veths (eth1, eth2, ...). Each
+	# front-panel port is a veth (ethN, wired by webmesh) that syncd's
+	# vslib relays to a tap (EthernetN), and only the tap should run an
+	# IP stack. With IPv6 left on ethN, the kernel accepts every packet
+	# for a global address (e.g. Loopback0) twice — once straight off
+	# ethN and again from vslib's copy on EthernetN — so each echo is
+	# answered twice per hop and duplicates multiply across hops. It
+	# also installs a bogus RA-learned default route via ethN. vslib
+	# uses raw sockets on ethN, which do not need IPv6. eth0 is the
+	# Docker management interface and is left alone. See issue #45.
+	for dev in /sys/class/net/eth*; do
+	iface=$(basename "$dev")
+	[ "$iface" = "eth0" ] && continue
+	sysctl -qw "net.ipv6.conf.$iface.disable_ipv6=1" 2>/dev/null || echo "WARNING: could not disable IPv6 on $iface"
+	done
+	echo "Disabled IPv6 on data-plane veths"
+
+	echo "Starting SONiC..."
 
 	# Start supervisord in the background so we can configure
 	# the VTEP interface and FRR after SONiC's daemons are up.
