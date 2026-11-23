@@ -174,7 +174,7 @@ func (w *Writer) writeCompose() error {
 		sb.WriteString(fmt.Sprintf("      - /var/run/redis-vs/%s:/var/run/redis\n", name))
 		sb.WriteString("      - ./sonic_entry.sh:/sonic_entry.sh:ro\n")
 		sb.WriteString(fmt.Sprintf("      - ./frr/%s.conf:/tmp/frr.conf:ro\n", name))
-		if w.Topology.SRv6 && sw.Role != "spine" {
+		if w.Topology.SRv6 {
 			sb.WriteString(fmt.Sprintf("      - ./srv6/%s.routes:/srv6.routes:ro\n", name))
 		}
 		sb.WriteString(fmt.Sprintf("    entrypoint: [\"/bin/bash\", \"/sonic_entry.sh\", \"%s\", \"%s\", \"%s\"]\n", dev, sw.VtepAddr, sw.OverlayIPv4))
@@ -390,9 +390,10 @@ func (w *Writer) writeEntryScript() error {
 	# Multi-hop topologies (ring, spine-leaf) require intermediate nodes
 	# to transit SRv6/underlay packets; the kernel default (0) silently
 	# drops transit traffic. This must stay OUTSIDE the /srv6.routes
-	# guard below: spines are transit-only and never receive a routes
-	# file, so a guard here would leave them blackholing every
-	# cross-leaf packet. Harmless on nodes that never forward.
+	# guard below: spines receive route files but the forwarding
+	# sysctls must be set regardless, so nesting them inside the
+	# guard would leave transit nodes blackholing cross-leaf traffic.
+	# Harmless on nodes that never forward.
 	sysctl -w net.ipv6.conf.all.forwarding=1 2>/dev/null || true
 	sysctl -w net.ipv6.conf.default.forwarding=1 2>/dev/null || true
 	for iface in $(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | grep -E '^(Ethernet|Loopback)'); do
@@ -547,13 +548,13 @@ func (w *Writer) findSwitchByDevice(dev string) (*topo.Switch, bool) {
 }
 
 // generateFRRConfig produces a complete FRR configuration for one switch.
-// Spines get a minimal BGP-only underlay config. Leaves and nodes (when
-// SRv6 is enabled) get the full config: VRF, SRv6 locator with End SID,
-// L3VPN address family, and a per-VRF BGP instance.
+// Spines get SRv6 locator + BGP SRv6 sections but no VRF or per-VRF BGP.
+// Leaves and nodes (when SRv6 is enabled) get the full config: VRF, SRv6
+// locator with End SID, L3VPN address family, and a per-VRF BGP instance.
 func (w *Writer) generateFRRConfig(sw topo.Switch) string {
 	neighbors := w.switchNeighbors(sw)
 	isSpine := sw.Role == "spine"
-	srv6 := w.Topology.SRv6 && !isSpine
+	srv6 := w.Topology.SRv6
 
 	var sb strings.Builder
 
@@ -564,8 +565,8 @@ func (w *Writer) generateFRRConfig(sw topo.Switch) string {
 	sb.WriteString(fmt.Sprintf("hostname %s\n", sw.Name))
 	sb.WriteString("!\n")
 
-	// VRF definition (SRv6 leaves/nodes only).
-	if srv6 {
+	// VRF definition (SRv6 leaves/nodes only — spines are VRF-less transit).
+	if srv6 && !isSpine {
 		sb.WriteString("vrf Vrf100\n")
 		sb.WriteString(" vni 100\n")
 		sb.WriteString("exit\n")
@@ -578,7 +579,7 @@ func (w *Writer) generateFRRConfig(sw topo.Switch) string {
 	sb.WriteString("exit\n")
 	sb.WriteString("!\n")
 
-	// SRv6 locator + static End SID (SRv6 leaves/nodes only).
+	// SRv6 locator + static End SID (SRv6 enabled, both spines and leaves/nodes).
 	// Must appear BEFORE router bgp — FRR 10.4.1 parser requires this
 	// ordering to transition between top-level nodes.
 	if srv6 {
@@ -625,7 +626,7 @@ func (w *Writer) generateFRRConfig(sw topo.Switch) string {
 	// IPv6 unicast address family (underlay)
 	sb.WriteString(" address-family ipv6 unicast\n")
 	sb.WriteString(fmt.Sprintf("  network %s\n", sw.VtepAddr))
-	if srv6 {
+	if srv6 && !isSpine {
 		sb.WriteString(fmt.Sprintf("  network %s\n", topo.LocatorPrefixForASN(sw.ASN)))
 	}
 	sb.WriteString("  neighbor TRANSIT activate\n")
@@ -635,7 +636,7 @@ func (w *Writer) generateFRRConfig(sw topo.Switch) string {
 	// L3VPN relay (SRv6 spines only).
 	// Spines relay VPN routes between leaves; next-hop-self ensures
 	// re-advertised routes point back to the spine.
-	if w.Topology.SRv6 && isSpine {
+	if srv6 && isSpine {
 		sb.WriteString(" !\n")
 		sb.WriteString(" address-family ipv4 vpn\n")
 		sb.WriteString("  neighbor TRANSIT activate\n")
@@ -644,11 +645,16 @@ func (w *Writer) generateFRRConfig(sw topo.Switch) string {
 	}
 
 	// L3VPN (SRv6 leaves/nodes only).
-	if srv6 {
+	if srv6 && !isSpine {
 		sb.WriteString(" !\n")
 		sb.WriteString(" address-family ipv4 vpn\n")
 		sb.WriteString("  neighbor TRANSIT activate\n")
 		sb.WriteString(" exit-address-family\n")
+	}
+
+	// SRv6 under BGP — both spines and leaves/nodes need this for
+	// locator advertisement and End SID assignment in BGP.
+	if srv6 {
 		sb.WriteString(" !\n")
 		sb.WriteString(" segment-routing srv6\n")
 		sb.WriteString(fmt.Sprintf("  locator %s\n", sw.Name))
@@ -659,7 +665,7 @@ func (w *Writer) generateFRRConfig(sw topo.Switch) string {
 	sb.WriteString("!\n")
 
 	// Per-VRF BGP instance (SRv6 leaves/nodes only).
-	if srv6 {
+	if srv6 && !isSpine {
 		sb.WriteString(fmt.Sprintf("router bgp %d vrf Vrf100\n", sw.ASN))
 		sb.WriteString(" !\n")
 		sb.WriteString(" address-family ipv4 unicast\n")
@@ -699,8 +705,9 @@ func (w *Writer) writeFRRConfigs() error {
 }
 
 // writeSRv6Routes writes per-switch seg6 route files into the srv6/
-// subdirectory. Only non-spine switches get route files; spines are
-// transit-only and do not terminate SRv6.
+// subdirectory. All switches (spines and leaves/nodes) get route files
+// so that every SRv6-capable node has its locator /64, End SID, and
+// overlay /128 assigned and can reach remote overlay prefixes.
 func (w *Writer) writeSRv6Routes() error {
 	srv6Dir := filepath.Join(w.OutputDir, "srv6")
 	if err := os.MkdirAll(srv6Dir, 0o755); err != nil {
@@ -708,11 +715,6 @@ func (w *Writer) writeSRv6Routes() error {
 	}
 
 	for _, sw := range w.Topology.Switches {
-		// Spines don't terminate SRv6 — skip them.
-		if sw.Role == "spine" {
-			continue
-		}
-
 		var sb strings.Builder
 		sb.WriteString("#!/bin/bash\n")
 		sb.WriteString(fmt.Sprintf("# SRv6 overlay routes for %s (ASN %d)\n", sw.Name, sw.ASN))
