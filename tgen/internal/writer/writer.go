@@ -386,6 +386,20 @@ func (w *Writer) writeEntryScript() error {
 	vtysh -f /tmp/frr.conf || echo "WARNING: vtysh -f returned non-zero"
 	echo "FRR configuration loaded"
 
+	# Enable IPv6 forwarding on every SONiC container, unconditionally.
+	# Multi-hop topologies (ring, spine-leaf) require intermediate nodes
+	# to transit SRv6/underlay packets; the kernel default (0) silently
+	# drops transit traffic. This must stay OUTSIDE the /srv6.routes
+	# guard below: spines are transit-only and never receive a routes
+	# file, so a guard here would leave them blackholing every
+	# cross-leaf packet. Harmless on nodes that never forward.
+	sysctl -w net.ipv6.conf.all.forwarding=1 2>/dev/null || true
+	sysctl -w net.ipv6.conf.default.forwarding=1 2>/dev/null || true
+	for iface in $(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | grep -E '^(Ethernet|Loopback)'); do
+	echo 1 > "/proc/sys/net/ipv6/conf/$iface/forwarding" 2>/dev/null || true
+	done
+	echo "Enabled IPv6 forwarding on all interfaces"
+
 	# If SRv6 routes file is present, enable seg6 on all interfaces and
 	# execute the routes script to program kernel seg6 routes.
 	if [ -f /srv6.routes ]; then
@@ -400,21 +414,12 @@ func (w *Writer) writeEntryScript() error {
 	done
 	echo "Enabled seg6_enabled=1 on all interfaces"
 
-	# Enable IPv6 forwarding. Multi-hop topologies (ring, spine-leaf)
-	# require intermediate nodes to transit SRv6/underlay packets; the
-	# kernel default (0) silently drops transit traffic. In a full mesh
-	# every pair is directly connected so forwarding is never needed,
-	# but enabling it is harmless and required for ring/clos.
-	sysctl -w net.ipv6.conf.all.forwarding=1 2>/dev/null || true
-	sysctl -w net.ipv6.conf.default.forwarding=1 2>/dev/null || true
-	for iface in $(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | grep -E '^(Ethernet|Loopback)'); do
-	echo 1 > "/proc/sys/net/ipv6/conf/$iface/forwarding" 2>/dev/null || true
-	done
-	echo "Enabled IPv6 forwarding on all interfaces"
-
 	echo "Loading SRv6 overlay routes..."
-	bash /srv6.routes || echo "WARNING: SRv6 routes script returned non-zero"
+	if bash /srv6.routes; then
 	echo "SRv6 overlay routes loaded"
+	else
+	echo "ERROR: SRv6 overlay routes NOT fully installed (see warnings above)"
+	fi
 	fi
 
 	# 1. First, create overlay IPv4 VLAN interface in VRF (SRv6 leaves only).
@@ -716,6 +721,7 @@ func (w *Writer) writeSRv6Routes() error {
 		sidAddr := topo.SidAddrForASN(sw.ASN)
 		sb.WriteString(fmt.Sprintf("# End SID:          %s\n", sidAddr))
 		sb.WriteString(fmt.Sprintf("# Overlay prefix:   %s\n\n", sw.OverlayPrefix))
+		sb.WriteString("FAILED=\"\"\n\n")
 
 		// Assign the SRv6 locator /64 to Loopback0 as a connected address.
 		// This is what actually enters the kernel RIB: without it the locator
@@ -745,8 +751,27 @@ func (w *Writer) writeSRv6Routes() error {
 		// Seg6 routes to every remote non-spine switch's overlay prefix.
 		// Each route: dest = remote overlay /64, SRH = [remote End SID].
 		// The outer dst (remote SID) falls within the remote locator /64
-		// advertised via BGP; the kernel performs a FIB lookup and uses
-		// BGP ECMP nexthops to forward the encapsulated packet.
+		// advertised via BGP; seg6_output_core() re-runs ip6_route_output
+		// on the encapsulated header with flowi6.oif = 0, so the packet is
+		// forwarded by that lookup (BGP ECMP nexthops included) rather than
+		// by the device named below. Verified on Linux 6.8: identical
+		// encapsulated traffic reaches the peer with "dev Loopback0" and
+		// with the transit interface.
+		//
+		// A device clause is mandatory here — iproute2 rejects a seg6 encap
+		// route without one ("RTNETLINK answers: No such device"). It is
+		// not purely cosmetic though: it also steers outer-source-address
+		// selection (dev Loopback0 yields the End SID as outer src, an
+		// egress interface yields that interface's underlay address).
+		// Loopback0 is used because the generator cannot name a unique
+		// transit interface per prefix in ring/spine-leaf topologies, where
+		// a remote prefix is reachable over several uplinks.
+		//
+		// "replace" instead of "add" keeps re-runs idempotent: "add" fails
+		// with EEXIST once the route exists (e.g. container restart).
+		// Errors are no longer sent to /dev/null; a failed install records
+		// its prefix in FAILED and the summary at the bottom surfaces it
+		// (exit 1) instead of silently blackholing the overlay.
 		for _, other := range w.Topology.Switches {
 			if other.Name == sw.Name {
 				continue
@@ -756,10 +781,17 @@ func (w *Writer) writeSRv6Routes() error {
 			}
 			remoteSID := topo.SidAddrForASN(other.ASN)
 			sb.WriteString(fmt.Sprintf(
-				"ip -6 route add %s encap seg6 mode encap segs %s dev Loopback0 2>/dev/null || true\n",
-				other.OverlayPrefix, remoteSID,
+				"ip -6 route replace %s encap seg6 mode encap segs %s dev Loopback0 || FAILED=\"$FAILED %s\"\n",
+				other.OverlayPrefix, remoteSID, other.OverlayPrefix,
 			))
 		}
+
+		sb.WriteString("\nif [ -n \"$FAILED\" ]; then\n")
+		sb.WriteString("\techo \"WARNING: failed to install seg6 routes:$FAILED\"\n")
+		sb.WriteString("\techo \"WARNING: check CONFIG_IPV6_SEG6_LWTUNNEL and seg6_enabled; SRv6 overlay will blackhole\"\n")
+		sb.WriteString("\texit 1\n")
+		sb.WriteString("fi\n")
+		sb.WriteString("echo \"All seg6 routes installed\"\n")
 
 		path := filepath.Join(srv6Dir, sw.Name+".routes")
 		if err := os.WriteFile(path, []byte(sb.String()), 0o755); err != nil {

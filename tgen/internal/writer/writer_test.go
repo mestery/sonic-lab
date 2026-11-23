@@ -439,9 +439,28 @@ func TestSRv6_Routes(t *testing.T) {
 		t.Error("missing overlay prefix /128 on Loopback0")
 	}
 
-	// Verify seg6 encap syntax
+	// Verify seg6 encap syntax: routes must use "replace" (idempotent on
+	// re-run) and record failures in FAILED instead of swallowing them
+	// with "2>/dev/null || true".
 	if !strings.Contains(routes, "encap seg6 mode encap segs") {
-		t.Error("missing seg6 encap syntax")
+		t.Fatal("missing seg6 encap syntax")
+	}
+	for _, line := range strings.Split(routes, "\n") {
+		if !strings.Contains(line, "encap seg6 mode encap segs") {
+			continue
+		}
+		if !strings.HasPrefix(line, "ip -6 route replace ") {
+			t.Errorf("seg6 route must be installed with 'ip -6 route replace': %q", line)
+		}
+		if strings.Contains(line, "|| true") {
+			t.Errorf("seg6 route failure must not be swallowed: %q", line)
+		}
+		if !strings.Contains(line, "|| FAILED=") {
+			t.Errorf("seg6 route failure must be recorded in FAILED: %q", line)
+		}
+	}
+	if !strings.Contains(routes, "All seg6 routes installed") {
+		t.Error("missing success summary line in route script")
 	}
 
 	// leaf1 (ASN 65100) should have a route to leaf2 (ASN 65101)
@@ -484,6 +503,9 @@ func TestSRv6_Routes_Mesh(t *testing.T) {
 	}
 	if !strings.Contains(routes, "fd00:0:0:fdea::100") {
 		t.Error("missing node3 End SID as SRH segment")
+	}
+	if strings.Contains(routes, "route add") {
+		t.Error("seg6 routes must use 'route replace' (idempotent), not 'route add'")
 	}
 	// Should not route to itself
 	if strings.Contains(routes, "fd00:0:0:fde8::100 encap") {
@@ -575,9 +597,33 @@ func TestSRv6_EntryScript(t *testing.T) {
 	}
 	script := string(data)
 
-	// The entry script should conditionally execute /srv6.routes
+	// The entry script should conditionally execute /srv6.routes, and a
+	// failed route install must be reported instead of swallowed (otherwise
+	// the overlay silently blackholes and the log looks clean).
 	if !strings.Contains(script, "/srv6.routes") {
 		t.Error("missing /srv6.routes execution in entry script")
+	}
+	if strings.Contains(script, "bash /srv6.routes ||") {
+		t.Error("entry script must not swallow /srv6.routes failures with '|| echo'")
+	}
+	if !strings.Contains(script, "if bash /srv6.routes; then") {
+		t.Error("entry script must branch on the /srv6.routes exit status")
+	}
+
+	// IPv6 forwarding is required on transit nodes (spines). Spines
+	// never receive a /srv6.routes file, so the forwarding sysctls must
+	// live OUTSIDE the "[ -f /srv6.routes ]" guard — a regression that
+	// nests them re-introduces silent cross-leaf blackholing. Assert
+	// the forwarding block appears before the guard, not inside it.
+	fwdIdx := strings.Index(script, "net.ipv6.conf.all.forwarding=1")
+	guardIdx := strings.Index(script, "if [ -f /srv6.routes ]; then")
+	switch {
+	case fwdIdx < 0:
+		t.Error("missing IPv6 forwarding enablement in entry script")
+	case guardIdx < 0:
+		t.Error("missing /srv6.routes guard in entry script")
+	case fwdIdx > guardIdx:
+		t.Error("IPv6 forwarding must be enabled before (and unconditionally to) the /srv6.routes guard")
 	}
 }
 

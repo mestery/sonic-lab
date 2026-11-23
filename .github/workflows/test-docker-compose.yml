@@ -48,6 +48,9 @@ jobs:
             tgen-args: "-r -n 4"
           - topology: mesh
             tgen-args: "-m -n 4"
+          - topology: spine-leaf-srv6
+            tgen-args: "-s 2 -l 4 -srv6"
+            srv6: true
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -167,6 +170,82 @@ jobs:
           done
 
           echo "All switches in $DIR reached full BGP convergence."
+
+      # SRv6-only: prove the overlay actually forwards, not just that BGP
+      # converged. Everything is derived from the generated srv6/*.routes
+      # files so the check is generator-driven, like the BGP check. Pairs
+      # run in order over the two spines (transit), and each reply proves
+      # decapsulation on the destination leaf.
+      - name: Verify SRv6 overlay forwards
+        if: ${{ matrix.srv6 }}
+        run: |
+          set +e
+          DIR="ci-${{ matrix.topology }}"
+
+          # Self-detect runner kernel support. If the kernel has no seg6,
+          # route installation fails loudly at boot and pings can never
+          # pass; report it clearly instead of failing the job.
+          leaf=$(docker ps --format '{{.Names}}' | grep -- '-leaf' | head -1)
+          if ! docker exec "$leaf" test -e /proc/sys/net/ipv6/conf/all/seg6_enabled; then
+            echo "Runner kernel lacks seg6 (no seg6_enabled sysctl) — skipping"
+            echo "data-plane checks. NOTE: seg6 routes were NOT installed, so"
+            echo "this run verifies bring-up only, not the SRv6 forwarding."
+            exit 0
+          fi
+
+          fail=0
+
+          # 1. Every seg6 route the generator wrote must be in the kernel
+          #    RIB of its source leaf, and the entry script must not have
+          #    logged the "ERROR: SRv6" marker (loud failure path).
+          for conf in "$DIR"/srv6/*.routes; do
+            sw=$(basename "$conf" .routes)
+            c="sonic-$sw"
+            expected=$(grep -c "encap seg6" "$conf")
+            ok=0
+            for i in $(seq 1 40); do
+              actual=$(docker exec "$c" ip -6 route show 2>/dev/null | grep -c "encap seg6")
+              if [ "${actual:-0}" -ge "$expected" ]; then ok=1; break; fi
+              sleep 3
+            done
+            actual=$(docker exec "$c" ip -6 route show 2>/dev/null | grep -c "encap seg6")
+            echo "$c: ${actual:-0}/$expected seg6 routes installed"
+            if [ "$ok" -ne 1 ]; then
+              echo "FAIL: $c has ${actual:-0}/$expected seg6 routes"
+              fail=1
+            fi
+            if docker logs "$c" 2>&1 | grep -q "ERROR: SRv6"; then
+              echo "FAIL: $c logged an SRv6 route-install error"
+              fail=1
+            fi
+          done
+
+          # 2. Cross-leaf overlay ping matrix (all ordered pairs). Source is
+          #    pinned to the sender's overlay /64 host address so the reply
+          #    must find its return seg6 route too. Retried as a matrix for
+          #    up to ~5 min: after BGP converges the learned locator routes
+          #    still need a moment to reach every leaf's FIB.
+          pingok=0
+          for i in $(seq 1 40); do
+            pingok=1
+            for f in "$DIR"/srv6/*.routes; do
+              s=$(basename "$f" .routes)
+              src=$(grep "Overlay prefix:" "$f" | awk '{print $NF}' | sed 's#/64##')
+              # Destinations = every leaf's overlay prefix except the sender's own.
+              for dst in $(grep -h "Overlay prefix:" "$DIR"/srv6/*.routes | awk '{print $NF}' | sed 's#/64##' | grep -v "^${src}\$"); do
+                docker exec "sonic-$s" ping -6 -c 3 -W 2 -I "${src}1" "${dst}1" >/dev/null 2>&1 || pingok=0
+              done
+            done
+            [ "$pingok" -eq 1 ] && break
+            sleep 5
+          done
+
+          if [ "$fail" -eq 0 ] && [ "$pingok" -eq 1 ]; then
+            echo "SRv6 overlay verified: routes installed and all cross-leaf pings pass."
+          else
+            echo "FAIL: SRv6 overlay check failed (fail=$fail pingok=$pingok)"
+            exit 1
+          fi
 
       - name: Cleanup
         if: always()
