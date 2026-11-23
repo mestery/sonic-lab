@@ -15,7 +15,26 @@
 	sleep 3
 	done
 
-	echo "vnet ready, starting SONiC..."
+	echo "vnet ready"
+
+	# Disable IPv6 on the raw data-plane veths (eth1, eth2, ...). Each
+	# front-panel port is a veth (ethN, wired by webmesh) that syncd's
+	# vslib relays to a tap (EthernetN), and only the tap should run an
+	# IP stack. With IPv6 left on ethN, the kernel accepts every packet
+	# for a global address (e.g. Loopback0) twice — once straight off
+	# ethN and again from vslib's copy on EthernetN — so each echo is
+	# answered twice per hop and duplicates multiply across hops. It
+	# also installs a bogus RA-learned default route via ethN. vslib
+	# uses raw sockets on ethN, which do not need IPv6. eth0 is the
+	# Docker management interface and is left alone. See issue #45.
+	for dev in /sys/class/net/eth*; do
+	iface=$(basename "$dev")
+	[ "$iface" = "eth0" ] && continue
+	sysctl -qw "net.ipv6.conf.$iface.disable_ipv6=1" 2>/dev/null || echo "WARNING: could not disable IPv6 on $iface"
+	done
+	echo "Disabled IPv6 on data-plane veths"
+
+	echo "Starting SONiC..."
 
 	# Start supervisord in the background so we can configure
 	# the VTEP interface and FRR after SONiC's daemons are up.
@@ -82,6 +101,21 @@
 	vtysh -f /tmp/frr.conf || echo "WARNING: vtysh -f returned non-zero"
 	echo "FRR configuration loaded"
 
+	# Enable IPv6 forwarding on every SONiC container, unconditionally.
+	# Multi-hop topologies (ring, spine-leaf) require intermediate nodes
+	# to transit SRv6/underlay packets; the kernel default (0) silently
+	# drops transit traffic. This must stay OUTSIDE the /srv6.routes
+	# guard below: spines receive route files but the forwarding
+	# sysctls must be set regardless, so nesting them inside the
+	# guard would leave transit nodes blackholing cross-leaf traffic.
+	# Harmless on nodes that never forward.
+	sysctl -w net.ipv6.conf.all.forwarding=1 2>/dev/null || true
+	sysctl -w net.ipv6.conf.default.forwarding=1 2>/dev/null || true
+	for iface in $(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | grep -E '^(Ethernet|Loopback)'); do
+	echo 1 > "/proc/sys/net/ipv6/conf/$iface/forwarding" 2>/dev/null || true
+	done
+	echo "Enabled IPv6 forwarding on all interfaces"
+
 	# If SRv6 routes file is present, enable seg6 on all interfaces and
 	# execute the routes script to program kernel seg6 routes.
 	if [ -f /srv6.routes ]; then
@@ -97,8 +131,11 @@
 	echo "Enabled seg6_enabled=1 on all interfaces"
 
 	echo "Loading SRv6 overlay routes..."
-	bash /srv6.routes || echo "WARNING: SRv6 routes script returned non-zero"
+	if bash /srv6.routes; then
 	echo "SRv6 overlay routes loaded"
+	else
+	echo "ERROR: SRv6 overlay routes NOT fully installed (see warnings above)"
+	fi
 	fi
 
 	# 1. First, create overlay IPv4 VLAN interface in VRF (SRv6 leaves only).
