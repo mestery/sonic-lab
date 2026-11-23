@@ -525,7 +525,7 @@ func TestSRv6_Routes_Mesh(t *testing.T) {
 		t.Error("seg6 routes must use 'route replace' (idempotent), not 'route add'")
 	}
 	// Should not route to itself
-	if strings.Contains(routes, "fd00:0:0:fde8::100 encap") {
+	if strings.Contains(routes, "segs fd00:0:0:fde8::100") {
 		t.Error("should not have seg6 route to own End SID")
 	}
 }
