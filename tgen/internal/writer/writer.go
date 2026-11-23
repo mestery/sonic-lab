@@ -390,9 +390,10 @@ func (w *Writer) writeEntryScript() error {
 	# Multi-hop topologies (ring, spine-leaf) require intermediate nodes
 	# to transit SRv6/underlay packets; the kernel default (0) silently
 	# drops transit traffic. This must stay OUTSIDE the /srv6.routes
-	# guard below: spines are transit-only and never receive a routes
-	# file, so a guard here would leave them blackholing every
-	# cross-leaf packet. Harmless on nodes that never forward.
+	# guard below: spines receive route files but the forwarding
+	# sysctls must be set regardless, so nesting them inside the
+	# guard would leave transit nodes blackholing cross-leaf traffic.
+	# Harmless on nodes that never forward.
 	sysctl -w net.ipv6.conf.all.forwarding=1 2>/dev/null || true
 	sysctl -w net.ipv6.conf.default.forwarding=1 2>/dev/null || true
 	for iface in $(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | grep -E '^(Ethernet|Loopback)'); do
