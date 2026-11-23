@@ -627,8 +627,8 @@ func TestSRv6_EntryScript(t *testing.T) {
 		t.Error("entry script must branch on the /srv6.routes exit status")
 	}
 
-	// IPv6 forwarding is required on transit nodes (spines). Spines
-	// never receive a /srv6.routes file, so the forwarding sysctls must
+	// IPv6 forwarding is required on transit nodes (spines). Spines now
+	// receive a /srv6.routes file, but the forwarding sysctls must still
 	// live OUTSIDE the "[ -f /srv6.routes ]" guard — a regression that
 	// nests them re-introduces silent cross-leaf blackholing. Assert
 	// the forwarding block appears before the guard, not inside it.
