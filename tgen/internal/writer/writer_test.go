@@ -286,14 +286,20 @@ func TestSRv6_FRRConfig(t *testing.T) {
 		t.Fatalf("writeFRRConfigs error: %v", err)
 	}
 
-	// Spine should NOT have SRv6 (transit-only)
+	// Spine should have SRv6 locator + BGP SRv6 (transit with SRv6)
 	data, err := os.ReadFile(filepath.Join(dir, "frr", "spine1.conf"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	spineCfg := string(data)
-	if strings.Contains(spineCfg, "segment-routing") {
-		t.Error("spine1 should not contain 'segment-routing' (spines are transit-only)")
+	if !strings.Contains(spineCfg, "segment-routing") {
+		t.Error("spine1 should contain 'segment-routing' (locator + End SID)")
+	}
+	if !strings.Contains(spineCfg, "locator spine1") {
+		t.Error("spine1 missing 'locator spine1'")
+	}
+	if !strings.Contains(spineCfg, "segment-routing srv6") {
+		t.Error("spine1 should contain 'segment-routing srv6' in BGP section")
 	}
 	if strings.Contains(spineCfg, "vrf Vrf100") {
 		t.Error("spine1 should not contain 'vrf Vrf100'")
@@ -417,9 +423,21 @@ func TestSRv6_Routes(t *testing.T) {
 		t.Fatalf("writeSRv6Routes error: %v", err)
 	}
 
-	// Spine should NOT have a route file (transit-only)
-	if _, err := os.ReadFile(filepath.Join(dir, "srv6", "spine1.routes")); err == nil {
-		t.Error("spine1 should not have an SRv6 route file (transit-only)")
+	// Spine should have a route file with SRv6 locators and End SIDs
+	spineRoutes, err := os.ReadFile(filepath.Join(dir, "srv6", "spine1.routes"))
+	if err != nil {
+		t.Fatalf("spine1 should have an SRv6 route file: %v", err)
+	}
+	spineRoutesStr := string(spineRoutes)
+	// Spine route file should have locator /64, End SID, and overlay /128
+	if !strings.Contains(spineRoutesStr, "fd00:0:0:fde8::/64") {
+		t.Error("spine1 missing locator prefix fd00:0:0:fde8::/64 on Loopback0")
+	}
+	if !strings.Contains(spineRoutesStr, "fd00:0:0:fde8::100/128") {
+		t.Error("spine1 missing End SID fd00:0:0:fde8::100/128 on Loopback0")
+	}
+	if !strings.Contains(spineRoutesStr, "2001:db8:fde8::1/128") {
+		t.Error("spine1 missing overlay prefix /128 on Loopback0")
 	}
 
 	// Leaf1 should have a route file
@@ -463,17 +481,16 @@ func TestSRv6_Routes(t *testing.T) {
 		t.Error("missing success summary line in route script")
 	}
 
-	// leaf1 (ASN 65100) should have a route to leaf2 (ASN 65101)
-	// but NOT to spine1 (spines don't terminate SRv6)
+	// leaf1 should have a route to leaf2
 	if !strings.Contains(routes, "2001:db8:fe4d::/64") {
 		t.Error("missing route to leaf2 overlay prefix")
 	}
 	if !strings.Contains(routes, "fd00:0:0:fe4d::100") {
 		t.Error("missing leaf2 End SID as SRH segment")
 	}
-	// Should NOT have a route to spine1
-	if strings.Contains(routes, "2001:db8:fde8::/64") {
-		t.Error("should not have route to spine1 overlay prefix (spines don't terminate SRv6)")
+	// Should NOT have a route to spine1 (spines don't terminate SRv6)
+	if strings.Contains(routes, "2001:db8:fde8::/64 encap") {
+		t.Error("should not have seg6 route to spine1 overlay prefix (spines don't terminate SRv6)")
 	}
 	// Should NOT have a route to itself
 	if strings.Contains(routes, "2001:db8:fe4c::/64 encap") {
@@ -528,9 +545,9 @@ func TestSRv6_ComposeMount(t *testing.T) {
 	}
 	compose := string(data)
 
-	// Spine should NOT have a srv6 routes mount (transit-only)
-	if strings.Contains(compose, "./srv6/spine1.routes:/srv6.routes:ro") {
-		t.Error("spine1 should not have a srv6 routes mount (transit-only)")
+	// Spine should now have a srv6 routes mount (spines terminate SRv6)
+	if !strings.Contains(compose, "./srv6/spine1.routes:/srv6.routes:ro") {
+		t.Error("spine1 should have a srv6 routes mount")
 	}
 	// Leaf1 should have the mount
 	if !strings.Contains(compose, "./srv6/leaf1.routes:/srv6.routes:ro") {
