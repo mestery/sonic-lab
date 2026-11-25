@@ -44,8 +44,10 @@ func main() {
 	ring := fs.Bool("r", false, "generate ring topology")
 	nodes := fs.Int("n", 0, "number of nodes (for -m or -r)")
 	links := fs.Int("links", 1, "parallel links per switch pair (for ECMP)")
-	hosts := fs.Int("h", 0, "number of hosts attached to each switch")
+	hosts := fs.Int("h", 0, "number of hosts attached to each leaf/node switch")
 	ports := fs.Int("p", 1, "number of ports per host (each port maps to a different switch)")
+	hostSpines := fs.Bool("host-spines", false, "also attach hosts to spines (spine-leaf mode)")
+	noHostAddr := fs.Bool("no-host-addr", false, "don't generate default host addressing (addressing.txt)")
 	srv6 := fs.Bool("srv6", false, "enable SRv6 overlay (locators, SIDs, seg6 routes)")
 	netnsSuffix := fs.String("base", topo.DefaultNetnsSuffix, "suffix for each switch's backing netns container (spine1-<base>)")
 
@@ -66,9 +68,16 @@ Links (optional):
   -links <int>  Parallel links per switch pair (default 1; enables ECMP)
 
 Hosts (optional):
-  -h <int>    Number of hosts attached to each switch
+  -h <int>    Number of hosts attached to each leaf (or ring/mesh node)
   -p <int>    Number of ports per host (default 1; each port maps to a
               different switch for redundancy)
+  -host-spines
+              Also attach hosts to spines (by default they attach to
+              leaves only, as in a Clos fabric)
+  -no-host-addr
+              Don't generate addressing.txt. By default each host link
+              gets a dual-stack subnet (10.S.H.0/24, fd00:0:S:H::/64),
+              applied after boot by apply-addressing.sh (start.sh runs it)
 
 Overlay (optional):
   -srv6       Enable SRv6 overlay (locators, SIDs, seg6 kernel routes)
@@ -101,6 +110,7 @@ Examples:
 		Links:          *links,
 		HostsPerSwitch: *hosts,
 		PortsPerHost:   *ports,
+		HostsOnSpines:  *hostSpines,
 		SRv6:           *srv6,
 		NetnsSuffix:    *netnsSuffix,
 	}
@@ -155,9 +165,14 @@ Examples:
 	if err != nil {
 		log.Fatalf("generating topology: %v", err)
 	}
+	for _, w := range t.Warnings {
+		fmt.Fprintf(os.Stderr, "WARNING: %s\n", w)
+	}
 
 	// Write output files
-	if err := writer.New(outDir, t).Run(); err != nil {
+	w := writer.New(outDir, t)
+	w.SkipHostAddr = *noHostAddr
+	if err := w.Run(); err != nil {
 		log.Fatalf("writing output: %v", err)
 	}
 

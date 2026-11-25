@@ -12,4 +12,11 @@
 	docker ps --filter "name=sonic-"
 	echo
 	echo "Webmesh UI: http://localhost:8092"
+
+	# Apply the default host addressing (the lab's starting state). This
+	# waits for the switches to finish booting, which takes a few minutes.
+	if [ -f addressing.txt ]; then
+	echo
+	./apply-addressing.sh addressing.txt
+	fi
 	
