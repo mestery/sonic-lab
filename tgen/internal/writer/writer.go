@@ -621,6 +621,26 @@ func (w *Writer) generateFRRConfig(sw topo.Switch) string {
 		sb.WriteString("!\n")
 	}
 
+	// Host-subnet advertisement policy. Fixed for the life of the lab and
+	// independent of any particular host addressing: every connected
+	// prefix inside the host pools is advertised, so hosts can be
+	// re-addressed at runtime (anywhere within the pools) with no FRR
+	// change. The pools exclude Docker's eth0 subnet, and the reserved
+	// fd00::/48 holds the loopbacks/locators/SIDs, which are advertised by
+	// their own network statements.
+	sb.WriteString(fmt.Sprintf("ip prefix-list HOST-SUBNETS-V4 seq 10 permit %s le 32\n", topo.HostIPv4Pool))
+	sb.WriteString(fmt.Sprintf("ipv6 prefix-list HOST-SUBNETS-V6 seq 5 deny %s le 128\n", topo.HostIPv6Reserved))
+	sb.WriteString(fmt.Sprintf("ipv6 prefix-list HOST-SUBNETS-V6 seq 10 permit %s le 128\n", topo.HostIPv6Pool))
+	sb.WriteString("!\n")
+	sb.WriteString("route-map HOST-SUBNETS permit 10\n")
+	sb.WriteString(" match ip address prefix-list HOST-SUBNETS-V4\n")
+	sb.WriteString("exit\n")
+	sb.WriteString("!\n")
+	sb.WriteString("route-map HOST-SUBNETS permit 20\n")
+	sb.WriteString(" match ipv6 address prefix-list HOST-SUBNETS-V6\n")
+	sb.WriteString("exit\n")
+	sb.WriteString("!\n")
+
 	// BGP router
 	sb.WriteString(fmt.Sprintf("router bgp %d\n", sw.ASN))
 	sb.WriteString(" no bgp ebgp-requires-policy\n")
@@ -648,8 +668,19 @@ func (w *Writer) generateFRRConfig(sw topo.Switch) string {
 	if srv6 && !isSpine {
 		sb.WriteString(fmt.Sprintf("  network %s\n", topo.LocatorPrefixForASN(sw.ASN)))
 	}
+	sb.WriteString("  redistribute connected route-map HOST-SUBNETS\n")
 	sb.WriteString("  neighbor TRANSIT activate\n")
 	sb.WriteString("  neighbor TRANSIT next-hop-self\n")
+	sb.WriteString(" exit-address-family\n")
+
+	// IPv4 unicast address family for host subnets. Carried over the same
+	// IPv6 link-local unnumbered sessions: FRR negotiates the extended
+	// next-hop capability (RFC 5549) for interface neighbors, so the
+	// fabric itself stays IPv6-only.
+	sb.WriteString(" !\n")
+	sb.WriteString(" address-family ipv4 unicast\n")
+	sb.WriteString("  redistribute connected route-map HOST-SUBNETS\n")
+	sb.WriteString("  neighbor TRANSIT activate\n")
 	sb.WriteString(" exit-address-family\n")
 
 	// L3VPN relay (SRv6 spines only).

@@ -7,6 +7,7 @@ license that can be found in the LICENSE file.
 package topo
 
 import (
+	"fmt"
 	"net"
 	"strings"
 	"testing"
@@ -305,7 +306,7 @@ func TestPortName(t *testing.T) {
 }
 func TestHosts_Basic(t *testing.T) {
 	// 2 spines, 1 leaf, 1 host per switch (3 total hosts)
-	tt := mustGenerate(t, Options{Spines: 2, Leaves: 1, HostsPerSwitch: 1})
+	tt := mustGenerate(t, Options{Spines: 2, Leaves: 1, HostsPerSwitch: 1, HostsOnSpines: true})
 
 	if len(tt.Hosts) != 3 {
 		t.Fatalf("Hosts = %d, want 3", len(tt.Hosts))
@@ -327,7 +328,7 @@ func TestHosts_Basic(t *testing.T) {
 }
 
 func TestHosts_Naming(t *testing.T) {
-	tt := mustGenerate(t, Options{Spines: 2, Leaves: 1, HostsPerSwitch: 2})
+	tt := mustGenerate(t, Options{Spines: 2, Leaves: 1, HostsPerSwitch: 2, HostsOnSpines: true})
 
 	// Total hosts = 2 per switch * 3 switches = 6
 	if len(tt.Hosts) != 6 {
@@ -343,7 +344,7 @@ func TestHosts_Naming(t *testing.T) {
 
 func TestHosts_MultiPort(t *testing.T) {
 	// 2 spines, 1 leaf, 2 hosts per switch, 2 ports per host
-	tt := mustGenerate(t, Options{Spines: 2, Leaves: 1, HostsPerSwitch: 2, PortsPerHost: 2})
+	tt := mustGenerate(t, Options{Spines: 2, Leaves: 1, HostsPerSwitch: 2, HostsOnSpines: true, PortsPerHost: 2})
 
 	// Total hosts = 2 * 3 = 6
 	if len(tt.Hosts) != 6 {
@@ -370,7 +371,7 @@ func TestHosts_PortMapping(t *testing.T) {
 	// host0: home=spine1(0), port0→spine1
 	// host1: home=spine2(1), port0→spine2
 	// host2: home=leaf1(2), port0→leaf1
-	tt := mustGenerate(t, Options{Spines: 2, Leaves: 1, HostsPerSwitch: 1})
+	tt := mustGenerate(t, Options{Spines: 2, Leaves: 1, HostsPerSwitch: 1, HostsOnSpines: true})
 
 	// Find host links (links where one endpoint is a host)
 	var hostLinks []Link
@@ -411,7 +412,7 @@ func TestHosts_PortMapping(t *testing.T) {
 func TestHosts_Redundancy(t *testing.T) {
 	// 2 spines, 2 leaves, 1 host per switch, 2 ports per host
 	// host0: home=spine1(0), port0→spine1(0), port1→spine2(1)
-	tt := mustGenerate(t, Options{Spines: 2, Leaves: 2, HostsPerSwitch: 1, PortsPerHost: 2})
+	tt := mustGenerate(t, Options{Spines: 2, Leaves: 2, HostsPerSwitch: 1, HostsOnSpines: true, PortsPerHost: 2})
 
 	// 4 switches * 1 host * 2 ports = 8 host links
 	var hostLinks []Link
@@ -462,7 +463,7 @@ func TestHosts_SwitchPortAllocation(t *testing.T) {
 	// spine1 has 2 switch ports (for 2 leaves) + 1 host port = 3 total
 	// leaf1 has 1 switch port (for 1 spine) + 1 host port = 2 total
 	// leaf2 has 1 switch port (for 1 spine) + 1 host port = 2 total
-	tt := mustGenerate(t, Options{Spines: 1, Leaves: 2, HostsPerSwitch: 1})
+	tt := mustGenerate(t, Options{Spines: 1, Leaves: 2, HostsPerSwitch: 1, HostsOnSpines: true})
 
 	for _, sw := range tt.Switches {
 		switch sw.Name {
@@ -924,5 +925,198 @@ func TestNetnsSuffix_DeviceNames(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func TestHosts_LeavesOnlyByDefault(t *testing.T) {
+	tt := mustGenerate(t, Options{Spines: 2, Leaves: 2, HostsPerSwitch: 1})
+
+	if len(tt.Hosts) != 2 {
+		t.Fatalf("Hosts = %d, want 2 (one per leaf, none on spines)", len(tt.Hosts))
+	}
+	for _, sw := range tt.Switches {
+		want := 2 // two spines or two leaves of fabric ports
+		if sw.Role == "leaf" {
+			want = 3 // plus one host port
+		}
+		if len(sw.Ports) != want {
+			t.Errorf("%s ports = %d, want %d", sw.Name, len(sw.Ports), want)
+		}
+	}
+	for _, a := range tt.Attachments {
+		if !strings.HasPrefix(a.Switch, "leaf") {
+			t.Errorf("%s attached to %s, want a leaf", a.Host, a.Switch)
+		}
+	}
+}
+
+func TestAddrIndex(t *testing.T) {
+	tt := mustGenerate(t, Options{Spines: 2, Leaves: 4})
+	want := map[string]int{
+		"spine1": SpineHostBase, "spine2": SpineHostBase + 1,
+		"leaf1": 1, "leaf2": 2, "leaf3": 3, "leaf4": 4,
+	}
+	for _, sw := range tt.Switches {
+		if sw.AddrIndex != want[sw.Name] {
+			t.Errorf("%s AddrIndex = %d, want %d", sw.Name, sw.AddrIndex, want[sw.Name])
+		}
+	}
+
+	for _, opts := range []Options{{Ring: true, Nodes: 3}, {Mesh: true, Nodes: 3}} {
+		tt := mustGenerate(t, opts)
+		for i, sw := range tt.Switches {
+			if sw.AddrIndex != i+1 {
+				t.Errorf("%+v: %s AddrIndex = %d, want %d", opts, sw.Name, sw.AddrIndex, i+1)
+			}
+		}
+	}
+}
+
+func TestHostAttachments_DefaultAddressing(t *testing.T) {
+	// 2 spines, 2 leaves, 2 hosts per leaf. Each leaf uses Ethernet0/4
+	// for the spines, so hosts land on Ethernet8 and Ethernet12.
+	tt := mustGenerate(t, Options{Spines: 2, Leaves: 2, HostsPerSwitch: 2})
+
+	want := []HostAttachment{
+		{"leaf1", "Ethernet8", "host1", "Ethernet0", "eth1", 1, "10.1.1.1/24", "10.1.1.2/24", "fd00:0:1:1::1/64", "fd00:0:1:1::2/64"},
+		{"leaf1", "Ethernet12", "host2", "Ethernet0", "eth1", 2, "10.1.2.1/24", "10.1.2.2/24", "fd00:0:1:2::1/64", "fd00:0:1:2::2/64"},
+		{"leaf2", "Ethernet8", "host3", "Ethernet0", "eth1", 1, "10.2.1.1/24", "10.2.1.2/24", "fd00:0:2:1::1/64", "fd00:0:2:1::2/64"},
+		{"leaf2", "Ethernet12", "host4", "Ethernet0", "eth1", 2, "10.2.2.1/24", "10.2.2.2/24", "fd00:0:2:2::1/64", "fd00:0:2:2::2/64"},
+	}
+	if len(tt.Attachments) != len(want) {
+		t.Fatalf("Attachments = %d, want %d", len(tt.Attachments), len(want))
+	}
+	for i, w := range want {
+		if tt.Attachments[i] != w {
+			t.Errorf("Attachments[%d] = %+v\nwant %+v", i, tt.Attachments[i], w)
+		}
+	}
+
+	// Every attachment must match a generated link.
+	for _, a := range tt.Attachments {
+		found := false
+		for _, l := range tt.Links {
+			if l.A == (Endpoint{tt.DeviceNetnsName(a.Switch), a.SwitchPort}) && l.B == (Endpoint{a.Host, a.HostPort}) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("no link for attachment %+v", a)
+		}
+	}
+}
+
+func TestHostAttachments_SpinesStartAtSpineHostBase(t *testing.T) {
+	tt := mustGenerate(t, Options{Spines: 1, Leaves: 1, HostsPerSwitch: 1, HostsOnSpines: true})
+	got := map[string]HostAttachment{}
+	for _, a := range tt.Attachments {
+		got[a.Switch] = a
+	}
+	wantV4 := fmt.Sprintf("10.%d.1.1/24", SpineHostBase)
+	wantV6 := fmt.Sprintf("fd00:0:%d:1::2/64", SpineHostBase)
+	if a := got["spine1"]; a.SwitchIPv4 != wantV4 || a.HostIPv6 != wantV6 {
+		t.Errorf("spine1 attachment = %+v, want %s / %s", a, wantV4, wantV6)
+	}
+	if a := got["leaf1"]; a.SwitchIPv4 != "10.1.1.1/24" || a.HostIPv6 != "fd00:0:1:1::2/64" {
+		t.Errorf("leaf1 attachment = %+v, want 10.1.1.x / fd00:0:1:1::x", a)
+	}
+}
+
+func TestHostAttachments_MultiPort(t *testing.T) {
+	// One host per leaf, two ports each: host1 → leaf1, leaf2;
+	// host2 → leaf2, leaf1. Each leaf then has two attachments, and the
+	// host index counts attachments per switch.
+	tt := mustGenerate(t, Options{Spines: 1, Leaves: 2, HostsPerSwitch: 1, PortsPerHost: 2})
+	if len(tt.Attachments) != 4 {
+		t.Fatalf("Attachments = %d, want 4", len(tt.Attachments))
+	}
+	seen := map[string]bool{}
+	for _, a := range tt.Attachments {
+		if seen[a.SwitchIPv4] {
+			t.Errorf("duplicate switch address %s", a.SwitchIPv4)
+		}
+		seen[a.SwitchIPv4] = true
+	}
+	if a := tt.Attachments[1]; a.Host != "host1" || a.HostIface != "eth2" || a.Switch != "leaf2" {
+		t.Errorf("host1 second port = %+v, want eth2 on leaf2", a)
+	}
+}
+
+// Every default address must sit inside the pools the fabric advertises,
+// and IPv6 must stay out of the reserved loopback/locator block.
+func TestHostAttachments_InsideAdvertisedPools(t *testing.T) {
+	_, v4Pool, _ := net.ParseCIDR(HostIPv4Pool)
+	_, v6Pool, _ := net.ParseCIDR(HostIPv6Pool)
+	_, v6Reserved, _ := net.ParseCIDR(HostIPv6Reserved)
+
+	tt := mustGenerate(t, Options{Spines: 2, Leaves: 4, HostsPerSwitch: 2, HostsOnSpines: true})
+	for _, a := range tt.Attachments {
+		for _, cidr := range []string{a.SwitchIPv4, a.HostIPv4} {
+			ip, _, err := net.ParseCIDR(cidr)
+			if err != nil || !v4Pool.Contains(ip) {
+				t.Errorf("%s: %s not inside %s (err %v)", a.Host, cidr, HostIPv4Pool, err)
+			}
+		}
+		for _, cidr := range []string{a.SwitchIPv6, a.HostIPv6} {
+			ip, _, err := net.ParseCIDR(cidr)
+			if err != nil || !v6Pool.Contains(ip) || v6Reserved.Contains(ip) {
+				t.Errorf("%s: %s not inside %s minus %s (err %v)", a.Host, cidr, HostIPv6Pool, HostIPv6Reserved, err)
+			}
+		}
+	}
+}
+
+func TestHostKernelIface(t *testing.T) {
+	for port, want := range map[string]string{"Ethernet0": "eth1", "Ethernet4": "eth2", "Ethernet116": "eth30"} {
+		if got, err := HostKernelIface(port); err != nil || got != want {
+			t.Errorf("HostKernelIface(%q) = %q, %v; want %q", port, got, err, want)
+		}
+	}
+	for _, bad := range []string{"eth1", "Ethernet2", ""} {
+		if _, err := HostKernelIface(bad); err == nil {
+			t.Errorf("HostKernelIface(%q) should fail", bad)
+		}
+	}
+}
+
+func TestHosts_AddrIndexWarning(t *testing.T) {
+	// Up to SpineHostBase-1 nodes with hosts: no warning.
+	tt := mustGenerate(t, Options{Ring: true, Nodes: SpineHostBase - 1, HostsPerSwitch: 1})
+	if len(tt.Warnings) != 0 {
+		t.Errorf("unexpected warnings: %v", tt.Warnings)
+	}
+
+	// One more and the last node is numbered SpineHostBase: a warning,
+	// not an error, because no spine has hosts to collide with.
+	tt = mustGenerate(t, Options{Ring: true, Nodes: SpineHostBase, HostsPerSwitch: 1})
+	if len(tt.Warnings) != 1 || !strings.Contains(tt.Warnings[0], fmt.Sprintf("node%d", SpineHostBase)) {
+		t.Errorf("Warnings = %v, want one naming node%d", tt.Warnings, SpineHostBase)
+	}
+
+	// Without hosts, addressing doesn't matter: no warning.
+	tt = mustGenerate(t, Options{Ring: true, Nodes: SpineHostBase})
+	if len(tt.Warnings) != 0 {
+		t.Errorf("unexpected warnings without hosts: %v", tt.Warnings)
+	}
+}
+
+func TestHosts_AddrIndexCollision(t *testing.T) {
+	// Spine-leaf can't reach SpineHostBase leaves through Generate (spine
+	// port limit), so build the topology directly: with hosts on spines,
+	// leaf<SpineHostBase> and spine1 would share 10.<SpineHostBase>.x.0/24.
+	tt := &Topology{NetnsSuffix: DefaultNetnsSuffix}
+	tt.Switches = append(tt.Switches, Switch{Name: "spine1", Role: "spine"})
+	for l := 1; l <= SpineHostBase; l++ {
+		tt.Switches = append(tt.Switches, Switch{Name: fmt.Sprintf("leaf%d", l), Role: "leaf"})
+	}
+	assignAddrIndexes(tt)
+	if err := addHosts(tt, 1, 1, true); err == nil || !strings.Contains(err.Error(), "spine1") {
+		t.Errorf("addHosts error = %v, want a collision naming spine1", err)
+	}
+}
+
+func TestHosts_AddrIndexOctetLimit(t *testing.T) {
+	if _, err := Generate(Options{Ring: true, Nodes: 256, HostsPerSwitch: 1}); err == nil {
+		t.Error("expected an error: node256's address index doesn't fit in an IPv4 octet")
 	}
 }

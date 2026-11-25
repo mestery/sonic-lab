@@ -25,8 +25,10 @@ type Topology struct {
 	Switches    []Switch
 	Hosts       []Host
 	Links       []Link
-	SRv6        bool   // enable SRv6 overlay generation
-	NetnsSuffix string // suffix for each switch's backing netns container (e.g. "linux")
+	Attachments []HostAttachment // one per host↔switch link, with default addressing
+	SRv6        bool             // enable SRv6 overlay generation
+	NetnsSuffix string           // suffix for each switch's backing netns container (e.g. "linux")
+	Warnings    []string         // non-fatal problems found while generating, for the CLI to print
 }
 
 // DefaultNetnsSuffix is the default suffix for backing netns containers
@@ -49,6 +51,11 @@ type Switch struct {
 	OverlayPrefix string // SRv6 overlay service prefix (e.g. 2001:db8:fd98::/64)
 	OverlayIPv4   string // IPv4 overlay address in VRF (e.g. 192.168.1.1/24)
 	Ports         []string
+	// AddrIndex is the switch number used in default host addressing
+	// (see HostAttachment). Leaves and ring/mesh nodes are numbered
+	// 1..N in order; spines start at SpineHostBase so their host
+	// subnets don't collide with leaf subnets.
+	AddrIndex int
 }
 
 // Host represents a simulated host container attached to one or more switches.
@@ -69,6 +76,75 @@ type Endpoint struct {
 	Port   string
 }
 
+// HostAttachment describes one host↔switch link and its default
+// addressing. The addresses are the lab's starting state only: they are
+// applied after boot and may be changed freely while the lab runs, so
+// nothing else in the generated fabric (e.g. FRR) depends on them.
+//
+// Default scheme, with S = switch AddrIndex and H = HostIndex:
+//
+//	IPv4: 10.S.H.0/24       switch 10.S.H.1, host 10.S.H.2
+//	IPv6: fd00:0:S:H::/64   switch fd00:0:S:H::1, host fd00:0:S:H::2
+//
+// S and H are written as the same decimal digits in both families so the
+// two line up visually (10.3.1.0/24 ↔ fd00:0:3:1::/64); in IPv6 the
+// digits are read as hex, which is harmless.
+type HostAttachment struct {
+	Switch     string // switch name, e.g. "leaf1"
+	SwitchPort string // SONiC port on the switch, e.g. "Ethernet8"
+	Host       string // host name, e.g. "host1"
+	HostPort   string // logical port on the host, as in topology.yml ("Ethernet0")
+	HostIface  string // kernel interface inside the host container ("eth1")
+	HostIndex  int    // 1-based index of this attachment on its switch
+
+	SwitchIPv4 string // e.g. "10.3.1.1/24"
+	HostIPv4   string // e.g. "10.3.1.2/24"
+	SwitchIPv6 string // e.g. "fd00:0:3:1::1/64"
+	HostIPv6   string // e.g. "fd00:0:3:1::2/64"
+}
+
+// Host address pools. The fabric advertises any connected prefix inside
+// these pools (see the HOST-SUBNETS policy in the FRR config), so users can
+// re-address hosts anywhere within them without touching FRR.
+//
+// HostIPv6Reserved is carved out of HostIPv6Pool because it holds the
+// switch loopbacks, SRv6 locators and End SIDs (fd00:0:0:<asn>::), which
+// are advertised separately. Host subnets never fall inside it because
+// AddrIndex is always >= 1.
+const (
+	HostIPv4Pool     = "10.0.0.0/8"
+	HostIPv6Pool     = "fd00::/32"
+	HostIPv6Reserved = "fd00::/48"
+
+	// SpineHostBase is the first AddrIndex given to spines, so spine host
+	// subnets start at 10.60.x.0/24. Leaves/nodes numbered at or above it
+	// overlap the spine range: a warning normally, an error when spines
+	// also get hosts and the subnets would actually collide.
+	SpineHostBase = 60
+	// maxAddrOctet bounds AddrIndex and HostIndex: both form an IPv4 octet.
+	maxAddrOctet = 255
+)
+
+// HostSubnetAddrs returns the default switch/host addresses for host
+// attachment H on the switch with AddrIndex S.
+func HostSubnetAddrs(s, h int) (switchV4, hostV4, switchV6, hostV6 string) {
+	return fmt.Sprintf("10.%d.%d.1/24", s, h),
+		fmt.Sprintf("10.%d.%d.2/24", s, h),
+		fmt.Sprintf("fd00:0:%d:%d::1/64", s, h),
+		fmt.Sprintf("fd00:0:%d:%d::2/64", s, h)
+}
+
+// HostKernelIface returns the kernel interface name a host's logical port
+// gets inside its container. webmesh uses the KVM lane map, under which
+// EthernetN is eth(N/4 + 1): Ethernet0 → eth1, Ethernet4 → eth2.
+func HostKernelIface(port string) (string, error) {
+	var n int
+	if _, err := fmt.Sscanf(port, "Ethernet%d", &n); err != nil || n%4 != 0 || n < 0 {
+		return "", fmt.Errorf("unexpected host port name %q", port)
+	}
+	return fmt.Sprintf("eth%d", n/4+1), nil
+}
+
 // Options controls topology generation.
 type Options struct {
 	Spines         int    // -s: number of spine switches
@@ -77,8 +153,9 @@ type Options struct {
 	Ring           bool   // -r: generate ring topology
 	Nodes          int    // -n: number of nodes (for mesh/ring)
 	Links          int    // -links: parallel links per switch pair (default 1)
-	HostsPerSwitch int    // -h: number of hosts attached to each switch
+	HostsPerSwitch int    // -h: number of hosts attached to each eligible switch
 	PortsPerHost   int    // -p: number of ports per host (default 1)
+	HostsOnSpines  bool   // -host-spines: also attach hosts to spines
 	SRv6           bool   // -srv6: enable SRv6 overlay generation
 	NetnsSuffix    string // -base: backing container suffix (default "linux")
 }
@@ -193,9 +270,11 @@ func Generate(opts Options) (*Topology, error) {
 		t = spineLeaf(opts.Spines, opts.Leaves, opts.Links, opts.NetnsSuffix)
 	}
 
+	assignAddrIndexes(t)
+
 	// Add hosts if requested
 	if opts.HostsPerSwitch > 0 {
-		if err := addHosts(t, opts.HostsPerSwitch, opts.PortsPerHost); err != nil {
+		if err := addHosts(t, opts.HostsPerSwitch, opts.PortsPerHost, opts.HostsOnSpines); err != nil {
 			return nil, err
 		}
 	}
@@ -214,15 +293,88 @@ func Generate(opts Options) (*Topology, error) {
 	return t, nil
 }
 
+// assignAddrIndexes numbers switches for default host addressing:
+// non-spine switches (leaves, ring/mesh nodes) 1..N in order, spines
+// SpineHostBase, SpineHostBase+1, ... in order.
+func assignAddrIndexes(t *Topology) {
+	nextOther, nextSpine := 1, SpineHostBase
+	for i := range t.Switches {
+		if t.Switches[i].Role == "spine" {
+			t.Switches[i].AddrIndex = nextSpine
+			nextSpine++
+		} else {
+			t.Switches[i].AddrIndex = nextOther
+			nextOther++
+		}
+	}
+}
+
+// checkAddrIndexes validates the AddrIndex of every switch that gets hosts.
+// Every index must fit in an IPv4 octet. Leaves/nodes numbered at or above
+// SpineHostBase overlap the spine range: if a spine with hosts has the
+// same index the default subnets would collide, which is an error;
+// otherwise it is only a warning, since nothing actually clashes.
+func checkAddrIndexes(t *Topology, eligible []int) error {
+	spineIdx := map[int]string{}
+	for _, si := range eligible {
+		if sw := t.Switches[si]; sw.Role == "spine" {
+			spineIdx[sw.AddrIndex] = sw.Name
+		}
+	}
+
+	var inSpineRange []string
+	for _, si := range eligible {
+		sw := t.Switches[si]
+		if sw.AddrIndex > maxAddrOctet {
+			return fmt.Errorf("%s: address index %d exceeds %d; too many switches for default host addressing",
+				sw.Name, sw.AddrIndex, maxAddrOctet)
+		}
+		if sw.Role == "spine" || sw.AddrIndex < SpineHostBase {
+			continue
+		}
+		if spine, ok := spineIdx[sw.AddrIndex]; ok {
+			return fmt.Errorf("%s and %s would both get host subnets 10.%d.x.0/24: more than %d leaves/nodes with hosts on spines",
+				sw.Name, spine, sw.AddrIndex, SpineHostBase-1)
+		}
+		inSpineRange = append(inSpineRange, sw.Name)
+	}
+	if len(inSpineRange) > 0 {
+		t.Warnings = append(t.Warnings, fmt.Sprintf(
+			"%d leaf/node switches with hosts are numbered %d or higher (%s ... %s), overlapping the spine host range (SpineHostBase=%d); "+
+				"no subnets collide now, but they would if spines also got hosts",
+			len(inSpineRange), SpineHostBase, inSpineRange[0], inSpineRange[len(inSpineRange)-1], SpineHostBase))
+	}
+	return nil
+}
+
 // addHosts appends host containers and host-to-switch links to the topology.
-// Each switch gets hostsPerSwitch hosts. Each host has portsPerHost ports,
-// with port p connecting to switch (homeSwitch + p) % totalSwitches.
-func addHosts(t *Topology, hostsPerSwitch, portsPerHost int) error {
+// Hosts attach to non-spine switches only, unless onSpines is set (in a
+// Clos fabric hosts belong on leaves). Each eligible switch gets
+// hostsPerSwitch hosts. Each host has portsPerHost ports, with port p
+// connecting to eligible switch (home + p) % len(eligible).
+//
+// Every host link is also recorded as a HostAttachment with its default
+// addressing.
+func addHosts(t *Topology, hostsPerSwitch, portsPerHost int, onSpines bool) error {
 	if portsPerHost < 1 {
 		portsPerHost = 1
 	}
 
-	totalSwitches := len(t.Switches)
+	// Indexes into t.Switches of the switches that get hosts.
+	var eligible []int
+	for i, sw := range t.Switches {
+		if sw.Role != "spine" || onSpines {
+			eligible = append(eligible, i)
+		}
+	}
+	if err := checkAddrIndexes(t, eligible); err != nil {
+		return err
+	}
+
+	totalSwitches := len(eligible)
+	if totalSwitches == 0 {
+		return fmt.Errorf("no switches eligible for hosts (hosts attach to leaves/nodes; use -host-spines to include spines)")
+	}
 	totalHosts := hostsPerSwitch * totalSwitches
 
 	// Create host entries
@@ -235,7 +387,8 @@ func addHosts(t *Topology, hostsPerSwitch, portsPerHost int) error {
 	}
 
 	// Track next available port index per switch (starts after switch-to-switch ports)
-	nextPort := make([]int, totalSwitches)
+	nextPort := make([]int, len(t.Switches))
+	hostCount := make([]int, len(t.Switches)) // attachments so far, per switch
 	for i, sw := range t.Switches {
 		nextPort[i] = len(sw.Ports)
 	}
@@ -243,27 +396,43 @@ func addHosts(t *Topology, hostsPerSwitch, portsPerHost int) error {
 	// Create host-to-switch links
 	for i := 0; i < totalHosts; i++ {
 		homeSwitch := i / hostsPerSwitch
+		hostName := fmt.Sprintf("host%d", i+1)
 		for p := 0; p < portsPerHost; p++ {
-			targetSwitch := (homeSwitch + p) % totalSwitches
+			target := eligible[(homeSwitch+p)%totalSwitches]
+			sw := &t.Switches[target]
 
-			idx := nextPort[targetSwitch]
+			idx := nextPort[target]
 			if idx >= MaxPorts {
 				return fmt.Errorf("%s would need %d ports (host connections), exceeds max %d",
-					t.Switches[targetSwitch].Name, idx+1, MaxPorts)
+					sw.Name, idx+1, MaxPorts)
 			}
-			nextPort[targetSwitch]++
+			nextPort[target]++
+			hostCount[target]++
 
-			t.Switches[targetSwitch].Ports = append(t.Switches[targetSwitch].Ports, portName(idx))
+			swPort, hostPort := portName(idx), portName(p)
+			sw.Ports = append(sw.Ports, swPort)
 
 			t.Links = append(t.Links, Link{
-				A: Endpoint{
-					Device: t.DeviceNetnsName(t.Switches[targetSwitch].Name),
-					Port:   portName(idx),
-				},
-				B: Endpoint{
-					Device: fmt.Sprintf("host%d", i+1),
-					Port:   portName(p),
-				},
+				A: Endpoint{Device: t.DeviceNetnsName(sw.Name), Port: swPort},
+				B: Endpoint{Device: hostName, Port: hostPort},
+			})
+
+			iface, err := HostKernelIface(hostPort)
+			if err != nil {
+				return err
+			}
+			swV4, hV4, swV6, hV6 := HostSubnetAddrs(sw.AddrIndex, hostCount[target])
+			t.Attachments = append(t.Attachments, HostAttachment{
+				Switch:     sw.Name,
+				SwitchPort: swPort,
+				Host:       hostName,
+				HostPort:   hostPort,
+				HostIface:  iface,
+				HostIndex:  hostCount[target],
+				SwitchIPv4: swV4,
+				HostIPv4:   hV4,
+				SwitchIPv6: swV6,
+				HostIPv6:   hV6,
 			})
 		}
 	}

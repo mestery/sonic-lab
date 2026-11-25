@@ -200,7 +200,7 @@ func TestGenerateFRRConfig_Ring(t *testing.T) {
 
 func TestGenerateFRRConfig_ExcludesHostLinks(t *testing.T) {
 	// 1 spine, 1 leaf, 1 host per switch
-	tt := mustGenerate(t, topo.Options{Spines: 1, Leaves: 1, HostsPerSwitch: 1})
+	tt := mustGenerate(t, topo.Options{Spines: 1, Leaves: 1, HostsPerSwitch: 1, HostsOnSpines: true})
 	w := New("/tmp/test", tt)
 
 	var spine *topo.Switch
@@ -720,5 +720,78 @@ func TestNetnsSuffix_ComposeAndNeighbors(t *testing.T) {
 	}
 	if got := len(w.switchNeighbors(spine)); got != 2 {
 		t.Errorf("spine1 switchNeighbors = %d, want 2 (one per leaf, hosts excluded)", got)
+	}
+}
+
+// Host subnets are advertised by a fixed policy, not per-subnet network
+// statements, so hosts can be re-addressed at runtime without touching
+// FRR (issue #47). Every switch gets the policy, with or without -srv6.
+func TestGenerateFRRConfig_HostSubnetPolicy(t *testing.T) {
+	for _, srv6 := range []bool{false, true} {
+		tt := mustGenerate(t, topo.Options{Spines: 1, Leaves: 2, HostsPerSwitch: 1, SRv6: srv6})
+		w := New("/tmp/test", tt)
+		for _, sw := range tt.Switches {
+			cfg := w.generateFRRConfig(sw)
+			for _, want := range []string{
+				"ip prefix-list HOST-SUBNETS-V4 seq 10 permit 10.0.0.0/8 le 32\n",
+				"ipv6 prefix-list HOST-SUBNETS-V6 seq 5 deny fd00::/48 le 128\n",
+				"ipv6 prefix-list HOST-SUBNETS-V6 seq 10 permit fd00::/32 le 128\n",
+				"route-map HOST-SUBNETS permit 10\n match ip address prefix-list HOST-SUBNETS-V4\n",
+				"route-map HOST-SUBNETS permit 20\n match ipv6 address prefix-list HOST-SUBNETS-V6\n",
+				" address-family ipv4 unicast\n  redistribute connected route-map HOST-SUBNETS\n  neighbor TRANSIT activate\n",
+			} {
+				if !strings.Contains(cfg, want) {
+					t.Errorf("srv6=%v %s: missing %q", srv6, sw.Name, want)
+				}
+			}
+
+			// IPv6: the redistribute must be in the default-VRF ipv6 AF.
+			v6 := cfg[strings.Index(cfg, " address-family ipv6 unicast\n"):]
+			v6 = v6[:strings.Index(v6, " exit-address-family\n")]
+			if !strings.Contains(v6, "  redistribute connected route-map HOST-SUBNETS\n") {
+				t.Errorf("srv6=%v %s: ipv6 unicast AF missing redistribute connected route-map", srv6, sw.Name)
+			}
+
+			// Policy must be defined before router bgp references it.
+			if strings.Index(cfg, "route-map HOST-SUBNETS permit") > strings.Index(cfg, "router bgp ") {
+				t.Errorf("srv6=%v %s: route-map must precede router bgp", srv6, sw.Name)
+			}
+			// Never a bare redistribute in the default VRF (would leak eth0).
+			def := cfg[:strings.Index(cfg, "\nexit\n!\n")+1]
+			if strings.Contains(def, "redistribute connected\n") {
+				t.Errorf("srv6=%v %s: bare redistribute connected in default VRF", srv6, sw.Name)
+			}
+		}
+	}
+}
+
+// Host addressing is applied after boot and may change at runtime, so no
+// generated switch file may depend on it.
+func TestHostAddressesNotInSwitchConfig(t *testing.T) {
+	tt := mustGenerate(t, topo.Options{Spines: 2, Leaves: 2, HostsPerSwitch: 2, HostsOnSpines: true})
+	dir := t.TempDir()
+	w := New(dir, tt)
+	if err := w.Run(); err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+
+	var files []string
+	frr, _ := filepath.Glob(filepath.Join(dir, "frr", "*.conf"))
+	files = append(files, frr...)
+	files = append(files, filepath.Join(dir, "sonic_entry.sh"), filepath.Join(dir, "docker-compose.yml"))
+	for _, f := range files {
+		data, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, a := range tt.Attachments {
+			for _, addr := range []string{a.SwitchIPv4, a.HostIPv4, a.SwitchIPv6, a.HostIPv6} {
+				bare := addr[:strings.Index(addr, "/")]
+				if strings.Contains(string(data), bare) {
+					t.Errorf("%s contains host address %s; host addressing must stay out of generated switch config",
+						filepath.Base(f), bare)
+				}
+			}
+		}
 	}
 }
