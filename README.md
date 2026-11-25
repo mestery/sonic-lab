@@ -244,7 +244,16 @@ go run . -s 1 -l 4 -o ../mylab/     # 1 spine, 4 leaves
 go run . -s 2 -l 6 -o ../dc/        # 2 spines, 6 leaves
 go run . -m -n 5 -o ../mesh/        # Full mesh of 5 nodes
 go run . -r -n 8 -o ../ring/        # Ring of 8 nodes
+go run . -s 2 -l 2 -h 1 -o ../hosts/  # 2x2 with one host per leaf
 ```
+
+With `-h`, tgen adds host containers and a default dual-stack address
+plan (`10.S.H.0/24`, `fd00:0:S:H::/64` per host link) in
+`addressing.txt`, which the generated `start.sh` applies once the
+switches have booted. The file is the lab's starting state; the devices
+hold the live state, so addresses can be changed at runtime with
+`apply-addressing.sh` or plain `config`/`ip` commands. See
+[Host addressing](tgen/README.md#host-addressing).
 
 > **Note:** The output directory must be a direct child of the repo root
 > (e.g., `../mylab/`) because the generated compose file uses
