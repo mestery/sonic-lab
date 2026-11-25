@@ -1031,10 +1031,15 @@ do_switch() {
     local dev="$1" port="$2" addr="$3" c="sonic-$1"
     switch_ready "$dev" || { fail "$c not ready"; return; }
     if [ "$MODE" = apply ]; then
+        # Re-adding an address already in CONFIG_DB succeeds without
+        # changing anything, which is what makes re-runs safe. Switch
+        # addresses only ever go through config, never "ip addr".
         docker exec "$c" config interface ip add "$port" "$addr" || { fail "$c: config interface ip add $port $addr"; return; }
         # intfmgrd programs the kernel asynchronously; confirm it landed.
+        # Field 4 of "ip -o addr" is exactly "<address>/<prefixlen>", so
+        # this is an exact match, not a substring one.
         local i=0
-        until docker exec "$c" ip addr show dev "$port" | grep -qwF "$addr"; do
+        until docker exec "$c" ip -o addr show dev "$port" | awk '{print $4}' | grep -qxF "$addr"; do
             i=$((i + 1))
             [ "$i" -ge 15 ] && { fail "$c: $addr not on $port in the kernel after 30s"; return; }
             sleep 2
@@ -1049,6 +1054,7 @@ do_host() {
     case "$addr" in *:*) fam="-6"; route="$V6_ROUTE"; dad="nodad" ;; esac
     host_ready "$dev" "$port" || { fail "$dev: $port not present"; return; }
     if [ "$MODE" = apply ]; then
+        # "replace" (not "add") makes re-applying the same address a no-op.
         docker exec "$dev" ip $fam addr replace "$addr" dev "$port" $dad || { fail "$dev: ip addr replace $addr dev $port"; return; }
         if [ -n "$gw" ]; then
             docker exec "$dev" ip $fam route replace "$route" via "$gw" dev "$port" || fail "$dev: route $route via $gw"

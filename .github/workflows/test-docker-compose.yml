@@ -109,9 +109,14 @@ jobs:
           DIR="ci-${{ matrix.topology }}"
           COMPOSE="docker compose -f $DIR/docker-compose.yml"
 
-          # Patch panel first, then the backing netns containers.
+          # Start everything that doesn't itself wait on webmesh: the patch
+          # panel, the backing netns containers and any hosts. webmesh can
+          # only report healthy once every link endpoint exists, so all of
+          # these must be up before the gate below. Only the SONiC switches
+          # (depends_on webmesh: service_healthy) wait for the second batch.
           $COMPOSE up -d webmesh
-          $COMPOSE up -d $($COMPOSE config --services | grep -- '-linux$')
+          $COMPOSE up -d $($COMPOSE config --format json | jq -r '.services | to_entries[]
+            | select(.value.depends_on.webmesh.condition != "service_healthy") | .key')
 
           # webmesh only reports healthy once every link is wired, so gate
           # the SONiC bring-up on that.
@@ -143,6 +148,17 @@ jobs:
 
           DIR="ci-${{ matrix.topology }}"
 
+          # Established sessions in one address family. Every TRANSIT peer
+          # is activated in both IPv4 (RFC 5549) and IPv6, and the plain
+          # "show bgp summary" lists each peer once per family, so count
+          # per family and take the smaller.
+          established() {
+            local v4 v6
+            v4=$(docker exec "$1" vtysh -c "show bgp ipv4 unicast summary" 2>/dev/null | awk '$10 ~ /^[0-9]+$/ || /Establ/ {n++} END {print n+0}')
+            v6=$(docker exec "$1" vtysh -c "show bgp ipv6 unicast summary" 2>/dev/null | awk '$10 ~ /^[0-9]+$/ || /Establ/ {n++} END {print n+0}')
+            if [ "${v4:-0}" -lt "${v6:-0}" ]; then echo "${v4:-0}"; else echo "${v6:-0}"; fi
+          }
+
           for conf in "$DIR"/frr/*.conf; do
             sw=$(basename "$conf" .conf)
             # Each BGP session is one "neighbor <iface> interface" line.
@@ -150,18 +166,18 @@ jobs:
             container="sonic-$sw"
 
             # Poll until every declared session is established (max ~5 min).
-            # `show bgp summary` lists each neighbor once: an established peer
+            # The summary lists each neighbor once per family: an established peer
             # shows a number in its State/PfxRcd column (field 10), a down peer
             # a BGP FSM state word; newer FRR prints the literal "Establ". So
             # "established" == field 10 all-digits, or the row carries "Establ".
             ok=0
             for i in $(seq 1 60); do
-              actual=$(docker exec "$container" vtysh -c "show bgp summary" 2>/dev/null | awk '$10 ~ /^[0-9]+$/ || /Establ/ {n++} END {print n+0}')
+              actual=$(established "$container")
               if [ "${actual:-0}" -ge "$expected" ]; then ok=1; break; fi
               sleep 5
             done
 
-            actual=$(docker exec "$container" vtysh -c "show bgp summary" 2>/dev/null | awk '$10 ~ /^[0-9]+$/ || /Establ/ {n++} END {print n+0}')
+            actual=$(established "$container")
             echo "$container: ${actual:-0}/${expected} BGP sessions established"
             if [ "$ok" -ne 1 ]; then
               echo "FAIL: $container only established ${actual:-0}/${expected} BGP sessions"

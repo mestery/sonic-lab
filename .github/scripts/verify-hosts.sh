@@ -11,8 +11,9 @@
 #   2. Ping every ordered pair of hosts in each address family, retrying
 #      until the fabric has advertised every host subnet.
 #   3. Re-ping every pair strictly: no loss and no duplicate replies.
-#   4. Re-address one host at runtime (remove, edit, re-apply), check the
-#      old subnet is withdrawn and the new one is advertised and reachable.
+#   4. Re-address one host at runtime to an unused subnet index (remove,
+#      edit, re-apply); check the old subnet is withdrawn and the new one
+#      is advertised and reachable.
 #
 # Runs on bash 3.2 (macOS) as well as CI's bash, so it can be run locally.
 #
@@ -117,8 +118,15 @@ v4=$(awk -v h="$h" '$1==h && $2 !~ /:/ {print $2; exit}' "$TMP/eps")
 v6=$(awk -v h="$h" '$1==h && $2 ~ /:/ {print $2; exit}' "$TMP/eps")
 old4="${v4%.*}"               # 10.S.H
 old6="${v6%::*}"              # fd00:0:S:H
-new4="${old4%.*}.99"
-new6="${old6%:*}:99"
+# Pick a host-link index no other link on that switch uses (H counts up
+# from 1, so start well above it and skip anything already in the file).
+idx=99
+while grep -qE "[[:space:]](${old4%.*}\.$idx\.|${old6%:*}:$idx::)" "$FILE"; do
+    idx=$((idx + 1))
+    [ "$idx" -le 255 ] || { echo "FAIL: no free host-link index on $h's switch"; exit 1; }
+done
+new4="${old4%.*}.$idx"
+new6="${old6%:*}:$idx"
 sw=$(awk -v gw="$old4.1/24" '$1 !~ /^#/ && $3==gw {print $1; exit}' "$FILE")
 other=$(awk -v sw="$sw" '$1 !~ /^#/ && NF==3 && $1!=sw {print $1; exit}' "$FILE")
 [ -n "$sw" ] && [ -n "$other" ] || { echo "FAIL: can't find $h's switch or another switch"; exit 1; }
