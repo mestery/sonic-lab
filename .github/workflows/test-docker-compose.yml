@@ -43,7 +43,8 @@ jobs:
       matrix:
         include:
           - topology: spine-leaf
-            tgen-args: "-s 2 -l 4"
+            tgen-args: "-s 2 -l 4 -h 1"
+            hosts: true
           - topology: ring
             tgen-args: "-r -n 4"
           - topology: mesh
@@ -170,6 +171,14 @@ jobs:
           done
 
           echo "All switches in $DIR reached full BGP convergence."
+
+      # Hosts only: apply the generated default addressing, then ping every
+      # host pair in both families (no loss, no duplicate replies) and
+      # re-address one host at runtime. Driven by the generated
+      # addressing.txt; see the script header for details.
+      - name: Verify host addressing and reachability
+        if: ${{ matrix.hosts }}
+        run: .github/scripts/verify-hosts.sh ci-${{ matrix.topology }}
 
       # SRv6-only: prove the overlay actually forwards, not just that BGP
       # converged. Everything is derived from the generated srv6/*.routes
