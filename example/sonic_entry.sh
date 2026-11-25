@@ -9,6 +9,11 @@
 	touch /usr/bin/docker
 	chmod +x /usr/bin/docker
 
+	# Readiness marker for tools that configure the switch after boot
+	# (e.g. apply-addressing.sh). Cleared here so a restarted container
+	# is not reported ready until this script has run to completion.
+	rm -f /tmp/sonic-lab-ready
+
 	echo "Waiting for vnet file /tmp/vnet_ready/$SWITCH"
 
 	while [ ! -f "/tmp/vnet_ready/$SWITCH" ]; do
@@ -198,6 +203,12 @@
 	# container (standard multi-ASIC design). In VS mode, lldpd runs in the
 	# main container, so patch the script to call lldpctl directly.
 	sed -i "s/\['sudo', 'docker', 'exec', '-i', 'lldp{}'.format(self\.lldp_instance\[lldp_instace_num\]), 'lldpctl'\]/['lldpctl']/" /usr/local/bin/lldpshow 2>/dev/null || true
+
+	# Boot-time configuration is complete (including any "config save"
+	# above). Post-boot tools wait for this marker so their changes are
+	# never captured by a boot-time save.
+	touch /tmp/sonic-lab-ready
+	echo "sonic-lab: switch boot configuration complete"
 
 	# Keep the container alive by waiting on supervisord.
 	wait $SUPERVISOR_PID

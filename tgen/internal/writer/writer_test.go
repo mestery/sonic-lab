@@ -9,6 +9,7 @@ package writer
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -793,5 +794,165 @@ func TestHostAddressesNotInSwitchConfig(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func TestAddressingFile_Content(t *testing.T) {
+	tt := mustGenerate(t, topo.Options{Spines: 2, Leaves: 2, HostsPerSwitch: 1})
+	dir := t.TempDir()
+	if err := New(dir, tt).Run(); err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "addressing.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := string(data)
+
+	// Parse the data rows the same way apply-addressing.sh does.
+	var rows [][]string
+	for _, line := range strings.Split(file, "\n") {
+		f := strings.Fields(line)
+		if len(f) == 0 || strings.HasPrefix(f[0], "#") {
+			continue
+		}
+		rows = append(rows, f)
+	}
+	want := [][]string{
+		{"leaf1", "Ethernet8", "10.1.1.1/24"},
+		{"leaf1", "Ethernet8", "fd00:0:1:1::1/64"},
+		{"host1", "eth1", "10.1.1.2/24", "10.1.1.1"},
+		{"host1", "eth1", "fd00:0:1:1::2/64", "fd00:0:1:1::1"},
+		{"leaf2", "Ethernet8", "10.2.1.1/24"},
+		{"leaf2", "Ethernet8", "fd00:0:2:1::1/64"},
+		{"host2", "eth1", "10.2.1.2/24", "10.2.1.1"},
+		{"host2", "eth1", "fd00:0:2:1::2/64", "fd00:0:2:1::1"},
+	}
+	if fmt.Sprint(rows) != fmt.Sprint(want) {
+		t.Errorf("addressing rows =\n%v\nwant\n%v", rows, want)
+	}
+	if !strings.Contains(file, "STARTING state") {
+		t.Error("addressing.txt should say it is the lab's starting state")
+	}
+}
+
+func TestAddressingFiles_WhenGenerated(t *testing.T) {
+	exists := func(dir, name string) bool {
+		_, err := os.Stat(filepath.Join(dir, name))
+		return err == nil
+	}
+
+	// No hosts: neither file.
+	dir := t.TempDir()
+	if err := New(dir, mustGenerate(t, topo.Options{Spines: 1, Leaves: 2})).Run(); err != nil {
+		t.Fatal(err)
+	}
+	if exists(dir, "addressing.txt") || exists(dir, "apply-addressing.sh") {
+		t.Error("no hosts: addressing files should not be generated")
+	}
+
+	// Hosts, SkipHostAddr: the script (for user files) but no plan.
+	dir = t.TempDir()
+	w := New(dir, mustGenerate(t, topo.Options{Spines: 1, Leaves: 2, HostsPerSwitch: 1}))
+	w.SkipHostAddr = true
+	if err := w.Run(); err != nil {
+		t.Fatal(err)
+	}
+	if exists(dir, "addressing.txt") || !exists(dir, "apply-addressing.sh") {
+		t.Error("SkipHostAddr: want apply-addressing.sh only")
+	}
+	if info, err := os.Stat(filepath.Join(dir, "apply-addressing.sh")); err != nil || info.Mode()&0o111 == 0 {
+		t.Error("apply-addressing.sh must be executable")
+	}
+}
+
+func TestApplyScript_Safety(t *testing.T) {
+	tt := mustGenerate(t, topo.Options{Spines: 1, Leaves: 2, HostsPerSwitch: 1})
+	dir := t.TempDir()
+	if err := New(dir, tt).Run(); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "apply-addressing.sh")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(data)
+
+	// Saving would make host addressing survive a restart; the design is
+	// that restarted devices come back blank.
+	for _, line := range strings.Split(script, "\n") {
+		if strings.Contains(line, "config save") && !strings.HasPrefix(strings.TrimSpace(line), "#") {
+			t.Errorf("apply-addressing.sh must never run config save: %q", line)
+		}
+	}
+	// Runs on the Docker host, which may be macOS bash 3.2.
+	for _, bash4 := range []string{"declare -A", "local -A", "mapfile", "readarray", ",,}", "^^}"} {
+		if strings.Contains(script, bash4) {
+			t.Errorf("apply-addressing.sh uses bash 4 feature %q", bash4)
+		}
+	}
+	for _, want := range []string{
+		`V4_ROUTE="10.0.0.0/8"`, `V6_ROUTE="fd00::/32"`, // pools substituted
+		"/tmp/sonic-lab-ready", // waits for switch boot to finish
+		"config interface ip add", "config interface ip remove",
+		`done 3< "$FILE"`, // loop input can't be consumed by docker exec
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("apply-addressing.sh missing %q", want)
+		}
+	}
+	if strings.Contains(script, "@V4_ROUTE@") || strings.Contains(script, "@V6_ROUTE@") {
+		t.Error("unsubstituted placeholder in apply-addressing.sh")
+	}
+
+	if bash, err := exec.LookPath("bash"); err == nil {
+		if out, err := exec.Command(bash, "-n", path).CombinedOutput(); err != nil {
+			t.Errorf("bash -n apply-addressing.sh: %v\n%s", err, out)
+		}
+	}
+}
+
+func TestEntryScript_ReadyMarker(t *testing.T) {
+	tt := mustGenerate(t, topo.Options{Spines: 1, Leaves: 1, SRv6: true})
+	dir := t.TempDir()
+	w := New(dir, tt)
+	if err := w.writeEntryScript(); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(filepath.Join(dir, "sonic_entry.sh"))
+	script := string(data)
+
+	clear := strings.Index(script, "rm -f /tmp/sonic-lab-ready")
+	set := strings.Index(script, "touch /tmp/sonic-lab-ready")
+	save := strings.LastIndex(script, "config save")
+	wait := strings.Index(script, "wait $SUPERVISOR_PID")
+	switch {
+	case clear < 0 || set < 0:
+		t.Fatal("entry script must clear and set /tmp/sonic-lab-ready")
+	case clear > strings.Index(script, "/usr/local/bin/supervisord"):
+		t.Error("ready marker must be cleared before SONiC starts")
+	case set < save:
+		t.Error("ready marker must be set after the boot-time config save")
+	case set > wait:
+		t.Error("ready marker must be set before waiting on supervisord")
+	}
+}
+
+func TestStartScript_AppliesAddressing(t *testing.T) {
+	dir := t.TempDir()
+	w := New(dir, mustGenerate(t, topo.Options{Spines: 1, Leaves: 1}))
+	if err := w.writeStartScript(); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(filepath.Join(dir, "start.sh"))
+	script := string(data)
+	up := strings.Index(script, "docker compose up -d")
+	apply := strings.Index(script, "./apply-addressing.sh addressing.txt")
+	if apply < 0 || !strings.Contains(script, "if [ -f addressing.txt ]") {
+		t.Fatal("start.sh must apply addressing.txt when present")
+	}
+	if apply < up {
+		t.Error("start.sh must apply addressing after bringing the lab up")
 	}
 }

@@ -47,6 +47,7 @@ func main() {
 	hosts := fs.Int("h", 0, "number of hosts attached to each leaf/node switch")
 	ports := fs.Int("p", 1, "number of ports per host (each port maps to a different switch)")
 	hostSpines := fs.Bool("host-spines", false, "also attach hosts to spines (spine-leaf mode)")
+	noHostAddr := fs.Bool("no-host-addr", false, "don't generate default host addressing (addressing.txt)")
 	srv6 := fs.Bool("srv6", false, "enable SRv6 overlay (locators, SIDs, seg6 routes)")
 	netnsSuffix := fs.String("base", topo.DefaultNetnsSuffix, "suffix for each switch's backing netns container (spine1-<base>)")
 
@@ -73,6 +74,10 @@ Hosts (optional):
   -host-spines
               Also attach hosts to spines (by default they attach to
               leaves only, as in a Clos fabric)
+  -no-host-addr
+              Don't generate addressing.txt. By default each host link
+              gets a dual-stack subnet (10.S.H.0/24, fd00:0:S:H::/64),
+              applied after boot by apply-addressing.sh (start.sh runs it)
 
 Overlay (optional):
   -srv6       Enable SRv6 overlay (locators, SIDs, seg6 kernel routes)
@@ -165,7 +170,9 @@ Examples:
 	}
 
 	// Write output files
-	if err := writer.New(outDir, t).Run(); err != nil {
+	w := writer.New(outDir, t)
+	w.SkipHostAddr = *noHostAddr
+	if err := w.Run(); err != nil {
 		log.Fatalf("writing output: %v", err)
 	}
 
