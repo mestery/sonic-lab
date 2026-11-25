@@ -64,8 +64,7 @@ Base URL: `http://localhost:8092` (host-mapped from container port 9090)
 |----------|--------|-------------|
 | `/` | GET | Web dashboard (auto-refreshes every 2s) |
 | `/v1/status` | GET | Healthcheck: `{"healthy":true,"desired":N,"applied":N}` |
-| `/v1/topology` | GET | Current desired topology |
-| `/v1/topology` | PUT | Replace desired topology (YAML or JSON body) |
+| `/v1/topology` | PUT | Replace desired topology (JSON body) |
 | `/v1/links` | GET | List all links with state + per-link stats |
 | `/v1/links/{key}` | GET | Inspect a single link |
 | `/v1/links/{key}/up` | POST | Bring a link up |
@@ -84,10 +83,11 @@ curl -s http://localhost:8092/v1/links | jq
 curl -X POST http://localhost:8092/v1/links/spine1-leaf1/down
 curl -X POST http://localhost:8092/v1/links/spine1-leaf1/up
 
-# Replace the entire topology at runtime
+# Replace the entire topology at runtime (JSON body; to push a YAML
+# topology file, use `webmeshctl push` below)
 curl -X PUT http://localhost:8092/v1/topology \
-  -H "Content-Type: application/yaml" \
-  -d @new-topology.yml
+  -H "Content-Type: application/json" \
+  -d @new-topology.json   # {"links":[{"endpoints":[{"device":...,"port":...}, ...]}, ...]}
 ```
 
 ## Topology File Format
